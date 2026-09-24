@@ -22,7 +22,9 @@ Requires macOS 13+ and Xcode (Swift 6 toolchain). Liquid Glass needs macOS 26; o
 open build/WebDock.app
 ```
 
-`build.sh` compiles with Swift Package Manager, assembles `build/WebDock.app`, builds the app icon from `BrowserBarIcon.iconset`, and ad-hoc signs it.
+`build.sh` compiles with Swift Package Manager, assembles `build/WebDock.app`, copies in `Resources/AppIcon.icns`, and signs it with your Developer ID or Apple Development certificate (falling back to ad-hoc; set `CODESIGN_IDENTITY` to choose one).
+
+The icon is generated from `BrowserBarIcon.iconset/BrowserBar_1024.png` by `Scripts/make-icon.py` (needs Pillow and NumPy), which redraws it full-bleed for the macOS 26+ icon shape. `build.sh` reruns it when the source art changes.
 
 For UI work, `open build/WebDock.app --args --show-panel` opens the panel on launch.
 
@@ -31,3 +33,7 @@ For UI work, `open build/WebDock.app --args --show-panel` opens the panel on lau
 - Left-click the menu bar icon to open or close the panel; right-click for Settings and Quit.
 - Add, edit, reorder, and remove sites in Settings (`⌘,`).
 - Right-click a sidebar icon to open the site in your browser, close its page, or change its layout and dark mode.
+
+## License
+
+WebDock is licensed under the [GNU General Public License v3.0](LICENSE).

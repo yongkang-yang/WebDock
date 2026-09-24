@@ -13,7 +13,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "globe", accessibilityDescription: "WebDock")
+            // The bare symbol draws at the menu bar's small default and looks
+            // undersized next to other round icons; bake the size in.
+            let configuration = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+            button.image = NSImage(systemSymbolName: "globe", accessibilityDescription: "WebDock")?
+                .withSymbolConfiguration(configuration)
             button.image?.isTemplate = true
             button.action = #selector(statusItemClicked(_:))
             button.target = self
