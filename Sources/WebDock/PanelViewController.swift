@@ -409,7 +409,7 @@ final class PanelViewController: NSViewController {
         let color = pageColor?.usingColorSpace(.sRGB)
         if model.pageColor != color { model.pageColor = color }
         let tint = color?.withAlphaComponent(0.78)
-        if #available(macOS 26, *), let glass = view as? NSGlassEffectView {
+        if #available(macOS 26, *), let glass = view.subviews.first as? NSGlassEffectView {
             glass.tintColor = tint
         } else {
             view.layer?.backgroundColor = tint?.cgColor

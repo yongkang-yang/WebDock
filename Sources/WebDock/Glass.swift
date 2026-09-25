@@ -84,7 +84,17 @@ func makeGlassBackground() -> (root: NSView, content: NSView) {
         let glass = NSGlassEffectView()
         glass.cornerRadius = Metrics.panelRadius
         glass.contentView = content
-        return (glass, content)
+        // Something in the panel leaves a faint fill in the corners outside the glass, and the
+        // window shadow, traced from alpha, then came out square. Clipping keeps them clear.
+        let clip = NSView(frame: NSRect(origin: .zero, size: Metrics.panelSize))
+        clip.wantsLayer = true
+        clip.layer?.cornerRadius = Metrics.panelRadius
+        clip.layer?.cornerCurve = .continuous
+        clip.layer?.masksToBounds = true
+        glass.frame = clip.bounds
+        glass.autoresizingMask = [.width, .height]
+        clip.addSubview(glass)
+        return (clip, content)
     }
     let effect = NSVisualEffectView()
     effect.material = .popover
