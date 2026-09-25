@@ -41,7 +41,7 @@ final class PanelViewController: NSViewController {
     private let homeID = PanelModel.homeID
     private let recentsKey = "recentPages"
     private let railPinnedKey = "railPinned"
-    private var rail: NSHostingView<RailView>!
+    private var rail: RailHostingView!
     private let railHotZone = HoverZoneView()
     private var pinnedRailConstraints: [NSLayoutConstraint] = []
     private var floatingRailConstraints: [NSLayoutConstraint] = []
@@ -68,7 +68,7 @@ final class PanelViewController: NSViewController {
         root.frame = NSRect(origin: .zero, size: Metrics.panelSize)
         view = root
 
-        rail = NSHostingView(rootView: RailView(model: model))
+        rail = RailHostingView(rootView: RailView(model: model))
         let header = NSHostingView(rootView: HeaderView(model: model))
         header.sizingOptions = []
 
@@ -874,6 +874,16 @@ extension PanelViewController: WKUIDelegate {
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
         completionHandler(alert.runModal() == .alertFirstButtonReturn)
+    }
+}
+
+// MARK: - Rail host
+
+/// NSHostingView hit-tests its SwiftUI content even while hidden, so the faded-out floating
+/// rail went on swallowing clicks meant for the page under it (ChatGPT's own sidebar).
+final class RailHostingView: NSHostingView<RailView> {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isHidden ? nil : super.hitTest(point)
     }
 }
 
