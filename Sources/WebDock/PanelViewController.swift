@@ -356,8 +356,12 @@ final class PanelViewController: NSViewController {
             config.userContentController.addUserScript(Self.forceDarkScript)
         }
 
-        let webView = WKWebView(frame: webCard.bounds, configuration: config)
         let mobile = isMobile(site)
+        if mobile {
+            config.userContentController.addUserScript(Self.wheelScrollScript)
+        }
+
+        let webView = WKWebView(frame: webCard.bounds, configuration: config)
         webView.customUserAgent = mobile ? mobileUserAgent : userAgent
         webView.uiDelegate = self
         webView.navigationDelegate = self
@@ -466,6 +470,44 @@ final class PanelViewController: NSViewController {
             }
         }
     }
+
+    /// Phone layouts often scroll an overflow: hidden box with their own touch handlers
+    /// (mobile Gmail's conversation view does), which a trackpad or mouse wheel never reaches.
+    /// This scrolls such boxes from wheel events, but only when nothing under the pointer
+    /// scrolls natively, so a clipped card on an ordinary page doesn't move along with it.
+    private static let wheelScrollScript = WKUserScript(source: """
+        (() => {
+          const canMove = (el, dx, dy) => dy
+            ? (dy > 0 ? el.scrollTop + el.clientHeight < el.scrollHeight - 1 : el.scrollTop > 0)
+            : (dx > 0 ? el.scrollLeft + el.clientWidth < el.scrollWidth - 1 : el.scrollLeft > 0);
+          addEventListener('wheel', e => {
+            if (e.defaultPrevented || e.ctrlKey) return;
+            const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
+            let dx = e.deltaX * unit, dy = e.deltaY * unit;
+            if (Math.abs(dy) >= Math.abs(dx)) dx = 0; else dy = 0;
+            if (!dx && !dy) return;
+            const html = document.documentElement, body = document.body;
+            const prop = dy ? 'overflowY' : 'overflowX';
+            let target = null;
+            for (const node of e.composedPath()) {
+              if (!(node instanceof Element) || node === html || node === body) continue;
+              if (!canMove(node, dx, dy)) continue;
+              const overflow = getComputedStyle(node)[prop];
+              if (overflow === 'auto' || overflow === 'scroll') return;
+              if (overflow === 'hidden') target ??= node;
+            }
+            // The viewport takes html's overflow, or body's when html's is visible.
+            let overflow = getComputedStyle(html)[prop];
+            if (overflow === 'visible' && body) overflow = getComputedStyle(body)[prop];
+            const root = document.scrollingElement;
+            if (root && canMove(root, dx, dy)) {
+              if (overflow !== 'hidden') return;
+              target ??= root;
+            }
+            target?.scrollBy(dx, dy);
+          }, { passive: true });
+        })();
+        """, injectionTime: .atDocumentStart, forMainFrameOnly: false)
 
     private func resolve(_ site: Site, as layout: Site.Layout, reload: Bool) {
         resolvedLayouts[site.id.uuidString] = layout.rawValue
