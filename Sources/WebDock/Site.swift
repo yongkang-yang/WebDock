@@ -64,16 +64,18 @@ struct Site: Codable, Identifiable, Equatable {
         return base(a) != nil && base(a) == base(b)
     }
 
-    /// Accepts "chatgpt.com" as well as full URLs; only http(s) with a host is valid.
+    /// Accepts "chatgpt.com" as well as full URLs; only http(s) with a real host is valid, so a
+    /// bare word like "YKpedia" (a name typed into the address field) is rejected.
     static func normalizedURL(from text: String) -> URL? {
         var string = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !string.isEmpty else { return nil }
+        guard !string.isEmpty, !string.contains(" ") else { return nil }
         if !string.contains("://") {
             string = "https://" + string
         }
         guard let url = URL(string: string),
               let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              url.host != nil else { return nil }
+              let host = url.host?.lowercased(),
+              host.contains(".") || host.contains(":") || host == "localhost" else { return nil }
         return url
     }
 }

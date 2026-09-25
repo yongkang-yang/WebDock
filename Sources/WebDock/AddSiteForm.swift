@@ -85,7 +85,14 @@ struct AddSiteForm: View {
     }
 
     private func add() {
-        guard let url = Site.normalizedURL(from: urlText) else {
+        var name = name
+        var url = Site.normalizedURL(from: urlText)
+        // The address went into the name field and the name into the address field.
+        if url == nil, let swapped = Site.normalizedURL(from: name) {
+            url = swapped
+            name = urlText
+        }
+        guard let url else {
             errorMessage = "Invalid URL. It must be an http(s) address."
             return
         }
