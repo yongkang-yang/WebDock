@@ -605,12 +605,16 @@ final class PanelViewController: NSViewController {
         }
     }
 
-    /// Closing the page on screen leaves the card empty until the user picks a site again;
-    /// closing home's search page goes back to the start page.
+    /// Closing the page on screen goes back to home (otherwise the next panel open would
+    /// recreate it); closing home's search page goes back to the start page.
     private func closeSite(id: UUID) {
         releaseWebView(id: id)
-        syncNavigationState()
-        focusCurrentWebView()
+        if id == selectedID, id != homeID {
+            select(id: homeID)
+        } else {
+            syncNavigationState()
+            focusCurrentWebView()
+        }
     }
 
     private var currentWebView: WKWebView? { selectedID.flatMap { webViews[$0] } }
@@ -734,6 +738,18 @@ extension PanelViewController: WKNavigationDelegate {
 
 // MARK: - WKUIDelegate
 
+extension PanelViewController: NSWindowDelegate {
+    /// Every popup close lands here, whether from its close button or from the page.
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let index = popupWindows.firstIndex(where: { $0 === window }) else { return }
+        (window.contentView as? WKWebView)?.stopLoading()
+        window.contentView = nil
+        window.delegate = nil
+        popupWindows.remove(at: index)
+    }
+}
+
 extension PanelViewController: WKUIDelegate {
     func webView(_ webView: WKWebView,
                  createWebViewWith configuration: WKWebViewConfiguration,
@@ -754,6 +770,9 @@ extension PanelViewController: WKUIDelegate {
                               backing: .buffered, defer: false)
         window.contentView = popup
         window.isReleasedWhenClosed = false
+        // The close button is the usual way out, and without this the popup stayed in
+        // popupWindows with its page (and web content process) alive until quit.
+        window.delegate = self
         window.level = .floating
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -761,12 +780,9 @@ extension PanelViewController: WKUIDelegate {
         return popup
     }
 
+    /// The page called window.close(); closing the window releases it in windowWillClose.
     func webViewDidClose(_ webView: WKWebView) {
-        popupWindows.removeAll { window in
-            guard window.contentView === webView else { return false }
-            window.close()
-            return true
-        }
+        popupWindows.first { $0.contentView === webView }?.close()
     }
 
     func webView(_ webView: WKWebView,
