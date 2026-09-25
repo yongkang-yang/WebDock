@@ -26,6 +26,8 @@ final class PanelViewController: NSViewController {
     private var autoMobileProbes: Set<UUID> = []
     /// Sites known to stay light whatever the system appearance.
     private let knownForceDarkHosts: Set<String> = ["mail.google.com"]
+    /// CSS hiding "get the app" banners that sites show to their phone layout.
+    private static let hiddenBanners: [String: String] = ["mail.google.com": "#speedbump"]
     private let resolvedDarkModesKey = "resolvedDarkModes"
     /// What .auto dark mode settled on per site ("force" / "native").
     private var resolvedDarkModes: [String: String] = [:]
@@ -360,6 +362,9 @@ final class PanelViewController: NSViewController {
         if mobile {
             config.userContentController.addUserScript(Self.wheelScrollScript)
         }
+        if let selector = site.url.host.flatMap({ Self.hiddenBanners[$0] }) {
+            config.userContentController.addUserScript(Self.hideScript(selector))
+        }
 
         let webView = WKWebView(frame: webCard.bounds, configuration: config)
         webView.customUserAgent = mobile ? mobileUserAgent : userAgent
@@ -508,6 +513,16 @@ final class PanelViewController: NSViewController {
           }, { passive: true });
         })();
         """, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+
+    private static func hideScript(_ selector: String) -> WKUserScript {
+        WKUserScript(source: """
+            (() => {
+              const style = document.createElement('style');
+              style.textContent = '\(selector) { display: none !important; }';
+              (document.head || document.documentElement).appendChild(style);
+            })();
+            """, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
 
     private func resolve(_ site: Site, as layout: Site.Layout, reload: Bool) {
         resolvedLayouts[site.id.uuidString] = layout.rawValue
