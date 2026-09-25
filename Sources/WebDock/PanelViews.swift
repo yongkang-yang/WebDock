@@ -26,6 +26,8 @@ final class PanelModel: ObservableObject {
     @Published var recents: [RecentPage] = []
     @Published var selectedID: UUID?
     @Published var liveIDs: Set<UUID> = []
+    /// Pinned pages are never released, and while one is on screen the panel stays open.
+    @Published var pinnedIDs: Set<UUID> = []
     @Published var isLoading = false
     @Published var canGoBack = false
     /// Pinned: the rail sits beside the page. Unpinned: it floats over the page on hover.
@@ -36,6 +38,8 @@ final class PanelModel: ObservableObject {
     var onSelect: (UUID) -> Void = { _ in }
     var onCloseSite: (UUID) -> Void = { _ in }
     var onOpenInBrowser: (UUID?) -> Void = { _ in }
+    /// nil means the page on screen.
+    var onTogglePin: (UUID?) -> Void = { _ in }
     var onBack: () -> Void = {}
     var onReload: () -> Void = {}
     var onOpenSettings: () -> Void = {}
@@ -104,6 +108,10 @@ struct RailView: View {
                     }
                     .contextMenu {
                         Button("Open in Browser") { model.onOpenInBrowser(site.id) }
+                        Button(model.pinnedIDs.contains(site.id) ? "Unpin Page" : "Pin Page") {
+                            model.onTogglePin(site.id)
+                        }
+                        .disabled(!model.liveIDs.contains(site.id))
                         Button("Close Page") { model.onCloseSite(site.id) }
                             .disabled(!model.liveIDs.contains(site.id))
                         Divider()
@@ -245,6 +253,11 @@ struct HeaderView: View {
                         }
                         GlassIconButton(symbol: "safari", help: "Open in Browser") {
                             model.onOpenInBrowser(nil)
+                        }
+                        let pinned = model.selectedID.map(model.pinnedIDs.contains) ?? false
+                        GlassIconButton(symbol: pinned ? "pin.fill" : "pin",
+                                        help: pinned ? "Unpin Page" : "Pin Page (keeps the panel open and the page loaded)") {
+                            model.onTogglePin(nil)
                         }
                     }
                 }

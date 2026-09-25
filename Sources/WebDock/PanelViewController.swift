@@ -8,8 +8,9 @@ import WebKit
 /// The panel opens on the start page (home) after launch; later opens return to the last page.
 ///
 /// Web view lifecycle: a site only gets a web view once it's opened. The page on screen is never
-/// released; any page that goes off screen (switched away, or the panel closed) is released after
-/// `releaseDelay`, and reopening it resumes the last URL.
+/// released, nor is a pinned one; any other page that goes off screen (switched away, or the panel
+/// closed) is released after `releaseDelay`, and reopening it resumes the last URL. Unpinning an
+/// off-screen page starts its countdown then.
 final class PanelViewController: NSViewController {
     private let lastURLsKey = "lastURLs"
     private let releaseDelay: TimeInterval = 3 * 60
@@ -57,6 +58,8 @@ final class PanelViewController: NSViewController {
     private var lastURLs: [String: String] = [:]
     private var popupWindows: [NSWindow] = []
     private var selectedID: UUID?
+    /// A pinned page is on screen, so clicking elsewhere shouldn't close the panel.
+    var keepsPanelOpen: Bool { selectedID.map(model.pinnedIDs.contains) ?? false }
     private var isPanelVisible = false
     private var storeSubscription: AnyCancellable?
     private var releaseTimer: Timer?
@@ -141,6 +144,7 @@ final class PanelViewController: NSViewController {
         }
         model.onCloseSite = { [weak self] id in self?.closeSite(id: id) }
         model.onOpenInBrowser = { [weak self] id in self?.openInBrowser(id: id) }
+        model.onTogglePin = { [weak self] id in self?.togglePin(id: id) }
         model.onBack = { [weak self] in self?.goBack() }
         model.onSearch = { [weak self] text in self?.search(text) }
         model.onReload = { [weak self] in self?.reload(nil) }
@@ -390,6 +394,15 @@ final class PanelViewController: NSViewController {
         loadedForceDark[id] = forceDark
         model.liveIDs = Set(webViews.keys)
         return webView
+    }
+
+    private func togglePin(id: UUID?) {
+        guard let id = id ?? selectedID, webViews[id] != nil else { return }
+        if model.pinnedIDs.remove(id) == nil {
+            model.pinnedIDs.insert(id)
+        } else if !(isPanelVisible && id == selectedID) {
+            hiddenSince[id] = Date()  // the full countdown starts now, not when it went off screen
+        }
     }
 
     private func syncNavigationState() {
@@ -648,6 +661,7 @@ final class PanelViewController: NSViewController {
         loadedMobile[id] = nil
         loadedForceDark[id] = nil
         hiddenSince[id] = nil
+        model.pinnedIDs.remove(id)
         model.liveIDs = Set(webViews.keys)
     }
 
@@ -656,7 +670,7 @@ final class PanelViewController: NSViewController {
         let cutoff = Date().addingTimeInterval(-age)
         for id in webViews.keys {
             let onScreen = isPanelVisible && id == selectedID
-            if !onScreen, let since = hiddenSince[id], since <= cutoff {
+            if !onScreen, !model.pinnedIDs.contains(id), let since = hiddenSince[id], since <= cutoff {
                 releaseWebView(id: id)
             }
         }

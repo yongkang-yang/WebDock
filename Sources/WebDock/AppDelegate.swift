@@ -34,9 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Switching to another app (Cmd+Tab, clicking its window, "open in browser") closes the panel.
+    /// Switching to another app (Cmd+Tab, clicking its window, "open in browser") closes the panel,
+    /// unless the page on screen is pinned.
     func applicationDidResignActive(_ notification: Notification) {
-        closePanel()
+        closePanelUnlessPinned()
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -65,7 +66,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.invalidateShadow()
 
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.closePanel()
+            self?.closePanelUnlessPinned()
+        }
+    }
+
+    private func closePanelUnlessPinned() {
+        if !panelController.keepsPanelOpen {
+            closePanel()
         }
     }
 
