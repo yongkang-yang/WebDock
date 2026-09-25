@@ -4,7 +4,6 @@ import SwiftUI
 /// Inner corners are concentric with the panel's: each radius is the outer one
 /// minus the padding between them, so the curves run parallel.
 enum Metrics {
-    static let panelSize = NSSize(width: 600, height: 720)
     static let panelRadius: CGFloat = 28
     static let panelPadding: CGFloat = 12
     static let cardRadius: CGFloat = panelRadius - panelPadding
@@ -78,7 +77,7 @@ struct GlassIconButton: View {
 }
 
 /// The panel's backdrop: a Liquid Glass slab with large continuous corners.
-func makeGlassBackground() -> (root: NSView, content: NSView) {
+func makeGlassBackground(size: NSSize) -> (root: NSView, content: NSView) {
     let content = NSView()
     if #available(macOS 26, *) {
         let glass = NSGlassEffectView()
@@ -86,7 +85,7 @@ func makeGlassBackground() -> (root: NSView, content: NSView) {
         glass.contentView = content
         // Something in the panel leaves a faint fill in the corners outside the glass, and the
         // window shadow, traced from alpha, then came out square. Clipping keeps them clear.
-        let clip = NSView(frame: NSRect(origin: .zero, size: Metrics.panelSize))
+        let clip = NSView(frame: NSRect(origin: .zero, size: size))
         clip.wantsLayer = true
         clip.layer?.cornerRadius = Metrics.panelRadius
         clip.layer?.cornerCurve = .continuous

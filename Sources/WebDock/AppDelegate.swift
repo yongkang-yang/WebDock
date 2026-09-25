@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let panelController = PanelViewController()
     private var panel: GlassPanel!
@@ -25,8 +25,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         panelController.onOpenSettings = { [weak self] in self?.openSettings(nil) }
+        panelController.onClosePanel = { [weak self] in self?.closePanel() }
+        // A page in its own window should be reachable from the Dock and ⌘Tab.
+        panelController.onDetachedWindowsChanged = { count in
+            NSApp.setActivationPolicy(count > 0 ? .regular : .accessory)
+        }
         panel = GlassPanel(contentViewController: panelController)
         panel.onDismiss = { [weak self] in self?.closePanel() }
+
+        HotKeyCenter.shared.onPress = { [weak self] in self?.togglePanel() }
+        HotKeyCenter.shared.start()
 
         // Development aid: `open WebDock.app --args --show-panel` opens the panel right away.
         if CommandLine.arguments.contains("--show-panel") {
@@ -40,10 +48,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         closePanelUnlessPinned()
     }
 
+    /// Clicking the Dock icon (shown while a page has its own window) with nothing on screen.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showPanel() }
+        return true
+    }
+
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
         if NSApp.currentEvent?.type == .rightMouseUp {
             showContextMenu()
-        } else if panel.isVisible {
+        } else {
+            togglePanel()
+        }
+    }
+
+    /// The global shortcut brings the panel forward if it's open behind another app's window.
+    private func togglePanel() {
+        if panel.isVisible && NSApp.isActive {
             closePanel()
         } else {
             showPanel()
@@ -56,6 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Drop down from the icon, centered on it but kept inside the screen.
         let iconFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
         let visible = (buttonWindow.screen ?? NSScreen.main)?.visibleFrame ?? iconFrame
+        if panel.frame.size != PanelSize.saved {  // reset in Settings
+            panel.setContentSize(PanelSize.saved)
+        }
         let size = panel.frame.size
         let x = min(max(iconFrame.midX - size.width / 2, visible.minX + 8), visible.maxX - size.width - 8)
         panel.setFrameOrigin(NSPoint(x: x, y: iconFrame.minY - 6 - size.height))
@@ -89,12 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openSettings(_ sender: Any?) {
         closePanel()
         if settingsWindow == nil {
-            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
-            window.title = "WebDock Settings"
-            window.styleMask = [.titled, .closable]
-            window.isReleasedWhenClosed = false
-            window.center()
-            settingsWindow = window
+            settingsWindow = makeSettingsWindow()
         }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
@@ -139,15 +158,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Reload", action: #selector(PanelViewController.reload(_:)), keyEquivalent: "r")
         viewMenu.addItem(withTitle: "New Tab", action: #selector(PanelViewController.newTab(_:)), keyEquivalent: "t")
+        viewMenu.addItem(.separator())
+        viewMenu.addItem(withTitle: "Find…", action: #selector(PanelViewController.showFind(_:)), keyEquivalent: "f")
+        viewMenu.addItem(withTitle: "Find Next", action: #selector(PanelViewController.findNext(_:)), keyEquivalent: "g")
+        viewMenu.addItem(withTitle: "Find Previous", action: #selector(PanelViewController.findPrevious(_:)), keyEquivalent: "G")
+        viewMenu.addItem(.separator())
+        // ⌘= is ⌘+ without Shift; both zoom in.
+        viewMenu.addItem(withTitle: "Zoom In", action: #selector(PanelViewController.zoomIn(_:)), keyEquivalent: "=")
+        viewMenu.addItem(withTitle: "Zoom In", action: #selector(PanelViewController.zoomIn(_:)), keyEquivalent: "+")
+        viewMenu.addItem(withTitle: "Zoom Out", action: #selector(PanelViewController.zoomOut(_:)), keyEquivalent: "-")
+        viewMenu.addItem(withTitle: "Actual Size", action: #selector(PanelViewController.actualSize(_:)), keyEquivalent: "0")
+        viewMenu.addItem(.separator())
         for number in 1...9 {
             let item = viewMenu.addItem(withTitle: "Site \(number)",
                                         action: #selector(PanelViewController.selectSiteByNumber(_:)),
                                         keyEquivalent: "\(number)")
             item.tag = number - 1
         }
+        viewMenu.delegate = self
         viewItem.submenu = viewMenu
         mainMenu.addItem(viewItem)
 
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+        NSApp.windowsMenu = windowMenu
+
         NSApp.mainMenu = mainMenu
+    }
+
+    /// The menu bar shows while a page has its own window; name the ⌘1–⌘9 items after the sites.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let sites = SiteStore.shared.sites
+        for item in menu.items where item.action == #selector(PanelViewController.selectSiteByNumber(_:)) {
+            item.isHidden = !sites.indices.contains(item.tag)
+            if sites.indices.contains(item.tag) {
+                item.title = sites[item.tag].name
+            }
+        }
     }
 }

@@ -13,5 +13,7 @@
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSMicrophoneUsageDescription</key><string>Sites you open in WebDock, such as ChatGPT's voice mode, can use the microphone.</string>
+    <key>NSCameraUsageDescription</key><string>Sites you open in WebDock, such as video calls, can use the camera.</string>
 </dict>
 </plist>

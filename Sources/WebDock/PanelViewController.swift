@@ -33,8 +33,27 @@ final class PanelViewController: NSViewController {
     /// What .auto dark mode settled on per site ("force" / "native").
     private var resolvedDarkModes: [String: String] = [:]
     private var loadedForceDark: [UUID: Bool] = [:]
+    private let pageZoomsKey = "pageZooms"
+    /// Zoom per site, when it isn't 100%.
+    private var pageZooms: [String: Double] = [:]
+    private static let zoomSteps: [Double] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
+    private let usageKey = "siteUsage"
+    /// Per site: a score that halves every week, and when it was last bumped.
+    private var usageRecords: [String: [Double]] = [:]
+    private static let usageHalfLife: TimeInterval = 7 * 24 * 3600
+    private let downloads = DownloadManager()
+    private var toastWork: DispatchWorkItem?
+    /// Pages moved out of the panel into windows of their own.
+    private var detachedWindows: [(window: NSWindow, observation: NSKeyValueObservation)] = []
+    /// The page whose video is fullscreen, its window, and how to put it back where it was.
+    private var fullscreen: (webView: WKWebView, window: FullscreenWindow, restore: () -> Void)?
+    /// Pages playing picture in picture.
+    private var pictureInPicture: Set<ObjectIdentifier> = []
 
     var onOpenSettings: (() -> Void)?
+    var onClosePanel: (() -> Void)?
+    /// How many detached windows are open, so the app can show in the Dock while there are any.
+    var onDetachedWindowsChanged: ((Int) -> Void)?
 
     private let model = PanelModel()
     private let webCard = NSView()
@@ -42,7 +61,8 @@ final class PanelViewController: NSViewController {
     private let homeID = PanelModel.homeID
     private let recentsKey = "recentPages"
     private let railPinnedKey = "railPinned"
-    private var rail: RailHostingView!
+    private var rail: PassThroughHostingView<RailView>!
+    private var findBar: PassThroughHostingView<FindBarView>!
     private let railHotZone = HoverZoneView()
     private var pinnedRailConstraints: [NSLayoutConstraint] = []
     private var floatingRailConstraints: [NSLayoutConstraint] = []
@@ -67,11 +87,15 @@ final class PanelViewController: NSViewController {
     private var appearanceObservation: NSKeyValueObservation?
 
     override func loadView() {
-        let (root, content) = makeGlassBackground()
-        root.frame = NSRect(origin: .zero, size: Metrics.panelSize)
+        let (root, content) = makeGlassBackground(size: PanelSize.saved)
+        root.frame = NSRect(origin: .zero, size: PanelSize.saved)
         view = root
 
-        rail = RailHostingView(rootView: RailView(model: model))
+        rail = PassThroughHostingView(rootView: RailView(model: model))
+        findBar = PassThroughHostingView(rootView: FindBarView(model: model))
+        findBar.sizingOptions = [.intrinsicContentSize]
+        let toast = PassThroughHostingView(rootView: ToastView(model: model))
+        toast.sizingOptions = [.intrinsicContentSize]
         let header = NSHostingView(rootView: HeaderView(model: model))
         header.sizingOptions = []
 
@@ -95,7 +119,7 @@ final class PanelViewController: NSViewController {
         railHotZone.onHoverChange = { [weak self] inside in self?.railHoverChanged(inside, fromHotZone: true) }
 
         // Order matters: the floating rail sits over the page, the hot zone over everything.
-        for subview in [header, webCard, rail, railHotZone] as [NSView] {
+        for subview in [header, webCard, findBar, toast, rail, railHotZone] as [NSView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(subview)
         }
@@ -116,6 +140,13 @@ final class PanelViewController: NSViewController {
             railHotZone.widthAnchor.constraint(equalToConstant: padding + 6),
             railHotZone.topAnchor.constraint(equalTo: webCard.topAnchor),
             railHotZone.bottomAnchor.constraint(equalTo: webCard.bottomAnchor),
+
+            findBar.topAnchor.constraint(equalTo: webCard.topAnchor, constant: 10),
+            findBar.trailingAnchor.constraint(equalTo: webCard.trailingAnchor, constant: -10),
+
+            toast.centerXAnchor.constraint(equalTo: webCard.centerXAnchor),
+            toast.bottomAnchor.constraint(equalTo: webCard.bottomAnchor, constant: -14),
+            toast.widthAnchor.constraint(lessThanOrEqualTo: webCard.widthAnchor, constant: -24),
         ])
 
         pinnedRailConstraints = [
@@ -135,6 +166,7 @@ final class PanelViewController: NSViewController {
         applyRailMode()
 
         model.onSelect = { [weak self] id in
+            self?.recordUse(of: id)
             self?.select(id: id)
             if self?.model.isRailPinned == false {
                 self?.hideRailWork?.cancel()
@@ -144,8 +176,25 @@ final class PanelViewController: NSViewController {
         }
         model.onCloseSite = { [weak self] id in self?.closeSite(id: id) }
         model.onOpenInBrowser = { [weak self] id in self?.openInBrowser(id: id) }
+        model.onOpenInWindow = { [weak self] id in self?.openInWindow(id: id) }
+        model.onAddSite = { [weak self] site in self?.addSite(site) }
+        model.pageForAdding = { [weak self] in self?.pageForAdding() ?? ("", "") }
+        model.onShowFind = { [weak self] in self?.showFind(nil) }
+        model.onFind = { [weak self] query, backwards, restart in
+            self?.find(query, backwards: backwards, restart: restart)
+        }
+        model.onCloseFind = { [weak self] in self?.closeFind() }
+        model.onZoom = { [weak self] change in self?.zoom(change) }
         model.onTogglePin = { [weak self] id in self?.togglePin(id: id) }
         model.onBack = { [weak self] in self?.goBack() }
+        model.onGoHome = { [weak self] in
+            guard let self else { return }
+            if self.selectedID == self.homeID {
+                self.newTab(nil)
+            } else {
+                self.select(id: self.homeID)
+            }
+        }
         model.onSearch = { [weak self] text in self?.search(text) }
         model.onReload = { [weak self] in self?.reload(nil) }
         model.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
@@ -161,6 +210,10 @@ final class PanelViewController: NSViewController {
             SiteStore.shared.sites[index].darkMode = mode
         }
         model.onRailHover = { [weak self] inside in self?.railHoverChanged(inside, fromHotZone: false) }
+        pageZooms = UserDefaults.standard.dictionary(forKey: pageZoomsKey) as? [String: Double] ?? [:]
+        usageRecords = UserDefaults.standard.dictionary(forKey: usageKey) as? [String: [Double]] ?? [:]
+        publishUsage()
+        downloads.onEvent = { [weak self] event in self?.downloadEvent(event) }
 
         selectedID = homeID
         lastURLs = UserDefaults.standard.dictionary(forKey: lastURLsKey) as? [String: String] ?? [:]
@@ -306,6 +359,10 @@ final class PanelViewController: NSViewController {
         lastURLs = lastURLs.filter { validKeys.contains($0.key) }
         resolvedLayouts = resolvedLayouts.filter { validKeys.contains($0.key) }
         resolvedDarkModes = resolvedDarkModes.filter { validKeys.contains($0.key) }
+        pageZooms = pageZooms.filter { validKeys.contains($0.key) }
+        usageRecords = usageRecords.filter { validKeys.contains($0.key) }
+        UserDefaults.standard.set(pageZooms, forKey: pageZoomsKey)
+        UserDefaults.standard.set(usageRecords, forKey: usageKey)
         UserDefaults.standard.set(resolvedDarkModes, forKey: resolvedDarkModesKey)
         UserDefaults.standard.set(lastURLs, forKey: lastURLsKey)
         UserDefaults.standard.set(resolvedLayouts, forKey: resolvedLayoutsKey)
@@ -324,6 +381,9 @@ final class PanelViewController: NSViewController {
     private func select(id: UUID?) {
         if let previous = selectedID, previous != id, webViews[previous] != nil {
             hiddenSince[previous] = Date()
+        }
+        if id != selectedID, model.isFindVisible {
+            closeFind(refocus: false)
         }
         selectedID = id
         model.selectedID = id
@@ -357,6 +417,9 @@ final class PanelViewController: NSViewController {
     private func makeWebView(for site: Site, url: URL? = nil) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()  // persistent cookies => stay logged in
+        VideoPresentation.enablePictureInPicture(config.preferences)
+        config.userContentController.addUserScript(VideoPresentation.script)
+        config.userContentController.add(WeakScriptMessageHandler(self), name: VideoPresentation.messageName)
         let forceDark = forcesDark(site)
         if forceDark {
             config.userContentController.addUserScript(Self.forceDarkScript)
@@ -375,6 +438,7 @@ final class PanelViewController: NSViewController {
         webView.uiDelegate = self
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = true
+        webView.pageZoom = pageZooms[site.id.uuidString] ?? 1
         webView.autoresizingMask = [.width, .height]
         webCard.addSubview(webView)
         webView.load(URLRequest(url: url ?? resumeURL(for: site)))
@@ -386,7 +450,10 @@ final class PanelViewController: NSViewController {
             webView.observe(\.themeColor) { [weak self] _, _ in self?.syncNavigationState() },
             webView.observe(\.underPageBackgroundColor) { [weak self] _, _ in self?.syncNavigationState() },
             // Chat apps retitle the page as a conversation gets named, without navigating.
-            webView.observe(\.title) { [weak self] webView, _ in self?.recordRecent(id: id, webView: webView) },
+            webView.observe(\.title) { [weak self] webView, _ in
+                self?.recordRecent(id: id, webView: webView)
+                self?.updateBadge(id: id, title: webView.title)
+            },
         ]
         webViews[id] = webView
         loadedURLs[id] = site.url
@@ -417,6 +484,8 @@ final class PanelViewController: NSViewController {
         // On home, "back" past the first search result returns to the start page.
         let canGoBack = (webView?.canGoBack ?? false) || (selectedID == homeID && webView != nil)
         startPage.isHidden = !(selectedID == homeID && webView == nil)
+        let zoom = webView?.pageZoom ?? 1
+        if model.zoom != zoom { model.zoom = zoom }
         if model.isLoading != isLoading { model.isLoading = isLoading }
         if model.canGoBack != canGoBack { model.canGoBack = canGoBack }
     }
@@ -650,13 +719,22 @@ final class PanelViewController: NSViewController {
     }
 
     private func releaseWebView(id: UUID) {
+        webViews[id]?.removeFromSuperview()
+        forgetWebView(id: id)
+    }
+
+    /// Drops the panel's hold on a site's web view, remembering where it was.
+    private func forgetWebView(id: UUID) {
         if let url = webViews[id]?.url {
             lastURLs[id.uuidString] = url.absoluteString
             UserDefaults.standard.set(lastURLs, forKey: lastURLsKey)
         }
+        if let webView = webViews[id] {
+            pictureInPicture.remove(ObjectIdentifier(webView))
+        }
         webViewObservations[id] = nil
-        webViews[id]?.removeFromSuperview()
         webViews[id] = nil
+        model.badges[id] = nil
         loadedURLs[id] = nil
         loadedMobile[id] = nil
         loadedForceDark[id] = nil
@@ -670,7 +748,8 @@ final class PanelViewController: NSViewController {
         let cutoff = Date().addingTimeInterval(-age)
         for id in webViews.keys {
             let onScreen = isPanelVisible && id == selectedID
-            if !onScreen, !model.pinnedIDs.contains(id), let since = hiddenSince[id], since <= cutoff {
+            if !onScreen, !model.pinnedIDs.contains(id), !isPlayingElsewhere(id: id),
+               let since = hiddenSince[id], since <= cutoff {
                 releaseWebView(id: id)
             }
         }
@@ -769,6 +848,7 @@ final class PanelViewController: NSViewController {
     /// ⌘1–⌘9 from the main menu; the menu item's tag is the site's index.
     @objc func selectSiteByNumber(_ sender: NSMenuItem) {
         guard sites.indices.contains(sender.tag) else { return }
+        recordUse(of: sites[sender.tag].id)
         select(id: sites[sender.tag].id)
     }
 
@@ -776,11 +856,345 @@ final class PanelViewController: NSViewController {
         guard let id = id ?? selectedID, let site = site(for: id) else { return }
         NSWorkspace.shared.open(webViews[id]?.url ?? (id == homeID ? site.url : resumeURL(for: site)))
     }
+
+    // MARK: - Video
+
+    /// Fullscreen and picture in picture video carry on outside the panel, so the page stays.
+    private func isPlayingElsewhere(id: UUID) -> Bool {
+        guard let webView = webViews[id] else { return false }
+        return fullscreen?.webView === webView || pictureInPicture.contains(ObjectIdentifier(webView))
+    }
+
+    /// Moves the page into a window over the screen below the menu bar; the page has already
+    /// pinned its fullscreen element over the viewport.
+    private func enterFullscreen(_ webView: WKWebView) {
+        guard fullscreen == nil, let hostWindow = webView.window else { return }
+        let screen = hostWindow.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        let restore: () -> Void
+        if hostWindow.contentView === webView {  // a page in its own window
+            hostWindow.contentView = NSView()
+            restore = { [weak hostWindow, weak webView] in hostWindow?.contentView = webView }
+        } else if let superview = webView.superview {  // the panel
+            let frame = webView.frame
+            webView.removeFromSuperview()
+            restore = { [weak superview, weak webView] in
+                guard let webView else { return }
+                webView.frame = frame
+                superview?.addSubview(webView)
+            }
+        } else {
+            return
+        }
+
+        let window = FullscreenWindow(screen: screen)
+        window.contentView = webView
+        window.onExit = { [weak self, weak webView] in
+            guard let webView else { return }
+            webView.evaluateJavaScript("window.__webdockFullscreen && window.__webdockFullscreen()")
+            // A page that navigated away no longer knows it was fullscreen.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.exitFullscreen(webView) }
+        }
+        fullscreen = (webView, window, restore)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(webView)
+    }
+
+    private func exitFullscreen(_ webView: WKWebView) {
+        guard let current = fullscreen, current.webView === webView else { return }
+        fullscreen = nil
+        current.window.contentView = NSView()
+        current.restore()
+        current.window.orderOut(nil)
+        if let window = webView.window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(webView)
+        }
+    }
+
+    // MARK: - Find
+
+    /// ⌘F. Pressing it again with the bar open goes back into its field.
+    @objc func showFind(_ sender: Any?) {
+        guard currentWebView != nil else { return }
+        model.isFindVisible = true
+        view.window?.makeFirstResponder(findBar)
+        model.findFocusRequest += 1
+        if !model.findQuery.isEmpty {
+            find(model.findQuery, backwards: false, restart: false)
+        }
+    }
+
+    @objc func findNext(_ sender: Any?) {
+        findAgain(backwards: false)
+    }
+
+    @objc func findPrevious(_ sender: Any?) {
+        findAgain(backwards: true)
+    }
+
+    private func findAgain(backwards: Bool) {
+        if model.isFindVisible, !model.findQuery.isEmpty {
+            find(model.findQuery, backwards: backwards, restart: false)
+        } else {
+            showFind(nil)
+        }
+    }
+
+    /// Finds from the current match; `restart` (the query changed) searches from the top instead.
+    private func find(_ query: String, backwards: Bool, restart: Bool) {
+        guard let webView = currentWebView, !query.isEmpty else {
+            model.findNotFound = false
+            return
+        }
+        let search = { [weak self, weak webView] in
+            let configuration = WKFindConfiguration()
+            configuration.backwards = backwards
+            configuration.caseSensitive = false
+            configuration.wraps = true
+            webView?.find(query, configuration: configuration) { result in
+                self?.model.findNotFound = !result.matchFound
+            }
+        }
+        if restart {
+            webView.evaluateJavaScript("window.getSelection().removeAllRanges()") { _, _ in search() }
+        } else {
+            search()
+        }
+    }
+
+    private func closeFind(refocus: Bool = true) {
+        model.isFindVisible = false
+        model.findNotFound = false
+        if refocus {
+            focusCurrentWebView()
+        }
+    }
+
+    // MARK: - Zoom
+
+    @objc func zoomIn(_ sender: Any?) { zoom(.zoomIn) }
+    @objc func zoomOut(_ sender: Any?) { zoom(.zoomOut) }
+    @objc func actualSize(_ sender: Any?) { zoom(.reset) }
+
+    /// Steps through Safari's zoom levels; the level sticks to the site.
+    private func zoom(_ change: PanelModel.ZoomChange) {
+        guard let id = selectedID, let webView = currentWebView else { return }
+        let current = webView.pageZoom
+        let steps = Self.zoomSteps
+        let zoom: Double = switch change {
+        case .zoomIn: steps.first { $0 > current + 0.001 } ?? steps.last!
+        case .zoomOut: steps.last { $0 < current - 0.001 } ?? steps.first!
+        case .reset: 1
+        }
+        webView.pageZoom = zoom
+        pageZooms[id.uuidString] = abs(zoom - 1) < 0.001 ? nil : zoom
+        UserDefaults.standard.set(pageZooms, forKey: pageZoomsKey)
+        syncNavigationState()
+        showToast(Toast(symbol: "plus.magnifyingglass", message: "Zoom \(Int((zoom * 100).rounded()))%"), for: 1.2)
+    }
+
+    // MARK: - Badges
+
+    /// "(3) Home / X", "[3] …", or "Inbox (3) - … - Gmail".
+    private static let badgePattern = try! NSRegularExpression(
+        pattern: #"^\s*[(\[](\d{1,5})\+?[)\]]|\b(?:Inbox|收件箱)\s*\((\d{1,5})\+?\)"#,
+        options: [.caseInsensitive])
+
+    static func unreadCount(in title: String) -> Int? {
+        let range = NSRange(title.startIndex..., in: title)
+        guard let match = badgePattern.firstMatch(in: title, range: range) else { return nil }
+        for group in 1...2 {
+            if let groupRange = Range(match.range(at: group), in: title), let count = Int(title[groupRange]) {
+                return count > 0 ? count : nil
+            }
+        }
+        return nil
+    }
+
+    private func updateBadge(id: UUID, title: String?) {
+        guard id != homeID else { return }
+        let count = title.flatMap(Self.unreadCount)
+        if model.badges[id] != count {
+            model.badges[id] = count
+        }
+    }
+
+    // MARK: - Usage
+
+    /// Each open counts one; older opens fade with a one-week half-life.
+    private func recordUse(of id: UUID) {
+        guard id != homeID, id != selectedID || !isPanelVisible else { return }
+        let now = Date().timeIntervalSince1970
+        usageRecords[id.uuidString] = [decayedUsage(usageRecords[id.uuidString], now: now) + 1, now]
+        UserDefaults.standard.set(usageRecords, forKey: usageKey)
+        publishUsage()
+    }
+
+    private func decayedUsage(_ record: [Double]?, now: TimeInterval) -> Double {
+        guard let record, record.count == 2 else { return 0 }
+        return record[0] * pow(0.5, (now - record[1]) / Self.usageHalfLife)
+    }
+
+    private func publishUsage() {
+        let now = Date().timeIntervalSince1970
+        var usage: [UUID: Double] = [:]
+        for (key, record) in usageRecords {
+            if let id = UUID(uuidString: key) {
+                usage[id] = decayedUsage(record, now: now)
+            }
+        }
+        model.usage = usage
+    }
+
+    // MARK: - Toasts
+
+    private func showToast(_ toast: Toast, for duration: TimeInterval = 4) {
+        toastWork?.cancel()
+        model.toast = toast
+        let work = DispatchWorkItem { [weak self] in self?.model.toast = nil }
+        toastWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    private func downloadEvent(_ event: DownloadManager.Event) {
+        switch event {
+        case .started(let name):
+            showToast(Toast(symbol: "arrow.down.circle", message: "Downloading \(name)…"), for: 2.5)
+        case .finished(let file):
+            showToast(Toast(symbol: "checkmark.circle", message: file.lastPathComponent,
+                            actionTitle: "Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([file])
+            }, for: 6)
+        case .failed(let name):
+            showToast(Toast(symbol: "exclamationmark.triangle", message: "Couldn’t download \(name)"))
+        }
+    }
+
+    // MARK: - Adding sites
+
+    private func pageForAdding() -> (url: String, name: String) {
+        guard let webView = currentWebView, let url = webView.url else { return ("", "") }
+        let title = webView.title.map(SiteTitle.brand(fromTitle:)) ?? ""
+        return (url.absoluteString, title.isEmpty ? SiteTitle.fromHost(url) : title)
+    }
+
+    private func addSite(_ site: Site) {
+        SiteStore.shared.sites.append(site)
+        showToast(Toast(symbol: "plus.circle", message: "Added \(site.name)"), for: 2)
+    }
+
+    // MARK: - Separate windows
+
+    /// Moves the page, as it is, into a window of its own; the panel starts afresh for the site.
+    private func openInWindow(id: UUID?) {
+        guard let id = id ?? selectedID, let site = site(for: id) else { return }
+        let webView = webViews[id] ?? makeWebView(for: site)
+        let wasMobile = loadedMobile[id] == true
+        webView.removeFromSuperview()
+        forgetWebView(id: id)
+        webView.isHidden = false
+        // A phone layout looks lost in a big window.
+        if wasMobile {
+            webView.customUserAgent = userAgent
+            webView.reload()
+        }
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 800),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        window.contentView = webView
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.title = Self.windowTitle(webView.title, fallback: site.name)
+        window.setFrameAutosaveName("WebDockPage")
+        if let last = detachedWindows.last?.window {
+            window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: last.frame.minX, y: last.frame.maxY)))
+        }
+        let observation = webView.observe(\.title) { [weak window] webView, _ in
+            window?.title = Self.windowTitle(webView.title, fallback: site.name)
+        }
+        detachedWindows.append((window, observation))
+        onDetachedWindowsChanged?(detachedWindows.count)
+
+        if id == selectedID {
+            select(id: homeID)
+        } else {
+            syncNavigationState()
+        }
+        onClosePanel?()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private static func windowTitle(_ title: String?, fallback: String) -> String {
+        guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return fallback }
+        return title
+    }
 }
 
 // MARK: - WKNavigationDelegate
 
+extension PanelViewController: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == VideoPresentation.messageName,
+              let body = message.body as? [String: Any], let webView = message.webView else { return }
+        if let on = body["fullscreen"] as? Bool, message.frameInfo.isMainFrame {
+            on ? enterFullscreen(webView) : exitFullscreen(webView)
+        }
+        if let on = body["pictureInPicture"] as? Bool {
+            if on {
+                pictureInPicture.insert(ObjectIdentifier(webView))
+            } else {
+                pictureInPicture.remove(ObjectIdentifier(webView))
+            }
+        }
+    }
+}
+
 extension PanelViewController: WKNavigationDelegate {
+    /// A new page loses the old one's fullscreen state.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        exitFullscreen(webView)
+    }
+
+    /// `<a download>` links download; links to other apps (mailto:, zoommtg:, …) open those apps.
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.shouldPerformDownload {
+            decisionHandler(.download)
+            return
+        }
+        let webSchemes: Set<String> = ["http", "https", "about", "blob", "data", "file", "javascript"]
+        if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(), !webSchemes.contains(scheme) {
+            if navigationAction.navigationType == .linkActivated || navigationAction.targetFrame?.isMainFrame == true {
+                NSWorkspace.shared.open(url)
+            }
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    /// What the page can't show (a zip, a .dmg) or marks as an attachment is saved instead.
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        let disposition = (navigationResponse.response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
+        let isAttachment = navigationResponse.isForMainFrame && disposition.hasPrefix("attachment")
+        decisionHandler(!navigationResponse.canShowMIMEType || isAttachment ? .download : .allow)
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        downloads.track(download)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        downloads.track(download)
+    }
+
     /// Hands the icons the page declares to the favicon store, apple-touch-icon first, then largest.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let id = webViews.first(where: { $0.value === webView })?.key,
@@ -812,10 +1226,19 @@ extension PanelViewController: WKNavigationDelegate {
 // MARK: - WKUIDelegate
 
 extension PanelViewController: NSWindowDelegate {
-    /// Every popup close lands here, whether from its close button or from the page.
+    /// Every popup close lands here, whether from its close button or from the page, and so
+    /// does every separate page window's.
     func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              let index = popupWindows.firstIndex(where: { $0 === window }) else { return }
+        guard let window = notification.object as? NSWindow else { return }
+        if let index = detachedWindows.firstIndex(where: { $0.window === window }) {
+            detachedWindows.remove(at: index)
+            (window.contentView as? WKWebView)?.stopLoading()
+            window.contentView = nil
+            window.delegate = nil
+            onDetachedWindowsChanged?(detachedWindows.count)
+            return
+        }
+        guard let index = popupWindows.firstIndex(where: { $0 === window }) else { return }
         (window.contentView as? WKWebView)?.stopLoading()
         window.contentView = nil
         window.delegate = nil
@@ -843,6 +1266,7 @@ extension PanelViewController: WKUIDelegate {
         let popup = WKWebView(frame: NSRect(x: 0, y: 0, width: 500, height: 640), configuration: configuration)
         popup.customUserAgent = userAgent
         popup.uiDelegate = self
+        popup.navigationDelegate = self  // for downloads
 
         let window = NSWindow(contentRect: popup.frame,
                               styleMask: [.titled, .closable, .resizable],
@@ -897,13 +1321,41 @@ extension PanelViewController: WKUIDelegate {
         alert.addButton(withTitle: "Cancel")
         completionHandler(alert.runModal() == .alertFirstButtonReturn)
     }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = prompt
+        let field = NSTextField(string: defaultText ?? "")
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        completionHandler(alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil)
+    }
+
+    /// Voice modes (ChatGPT, Gemini) need the microphone. The site itself gets it without
+    /// WebKit asking every time; macOS still asks once for the app. Other origins, such as
+    /// embedded frames, get WebKit's usual prompt.
+    func webView(_ webView: WKWebView,
+                 requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo,
+                 type: WKMediaCaptureType,
+                 decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        decisionHandler(Site.isSameSite(origin.host, webView.url?.host) ? .grant : .prompt)
+    }
 }
 
 // MARK: - Rail host
 
 /// NSHostingView hit-tests its SwiftUI content even while hidden, so the faded-out floating
 /// rail went on swallowing clicks meant for the page under it (ChatGPT's own sidebar).
-final class RailHostingView: NSHostingView<RailView> {
+/// The find bar and toasts float over the page the same way.
+final class PassThroughHostingView<Content: View>: NSHostingView<Content> {
     override func hitTest(_ point: NSPoint) -> NSView? {
         isHidden ? nil : super.hitTest(point)
     }

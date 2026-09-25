@@ -12,6 +12,15 @@ A macOS menu bar app that keeps your favorite web apps — ChatGPT, Claude, Gemi
 - **Adapts to the page** — the glass takes on the page's color, and the chrome goes light or dark with it.
 - **Per-site layout** — Auto / Desktop / Mobile. Auto switches desktop-only sites to their mobile version when they don't fit.
 - **Per-site dark mode** — Auto / Force / Off. Auto darkens pages that ignore the system's dark mode, and follows the system live.
+- **Global shortcut** — `⌥Space` (changeable in Settings) shows or hides the panel from any app.
+- **Resizable** — drag the panel's left, right or bottom edge; the size is remembered.
+- **Find and zoom** — `⌘F` / `⌘G` find on the page; `⌘+` / `⌘−` / `⌘0` zoom, remembered per site.
+- **Unread badges** — sidebar icons show the count a page puts in its title, like Gmail's "Inbox (3)".
+- **Downloads** — files go to Downloads, with a "Show in Finder" toast when done.
+- **Microphone and camera** — voice modes and calls work; the site gets access without asking each time.
+- **Open in Window** — move a page, as it is, into a window of its own.
+- **Video** — a player's fullscreen button fills the screen below the menu bar (Esc to leave), and picture in picture works; a page playing either way isn't released.
+- **Add from the panel** — the start page's "+" tile, or "Add Page as Site" in the header's ⋯ menu; the name fills itself in.
 
 ## Build
 
@@ -32,7 +41,9 @@ For UI work, `open build/WebDock.app --args --show-panel` opens the panel on lau
 
 - Left-click the menu bar icon to open or close the panel; right-click for Settings and Quit.
 - Add, edit, reorder, and remove sites in Settings (`⌘,`).
-- Right-click a sidebar icon to open the site in your browser, close its page, or change its layout and dark mode.
+- Right-click a sidebar icon to open the site in your browser or its own window, close its page, or change its layout and dark mode.
+- The ✕ at the header's right closes the page on screen; it asks for a second click so a stray one doesn't.
+- Settings (`⌘,`) has an Open at Login switch, the global shortcut, and whether the start page puts your most used sites first.
 
 ## License
 
