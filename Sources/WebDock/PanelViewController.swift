@@ -771,8 +771,10 @@ extension PanelViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let id = webViews.first(where: { $0.value === webView })?.key,
               let site = site(for: id),
-              let host = site.url.host,
-              Site.isSameSite(webView.url?.host, host) else { return }
+              let url = webView.url, Site.isSameSite(url.host, site.url.host),
+              FaviconStore.key(for: site.url)?.contains("/") != true
+                  || url.pathComponents.dropFirst().first == site.url.pathComponents.dropFirst().first
+        else { return }
         checkAutoLayout(of: webView, site: site)
         checkAutoDarkMode(of: webView, site: site)
 
@@ -788,7 +790,7 @@ extension PanelViewController: WKNavigationDelegate {
         """
         webView.evaluateJavaScript(script) { result, _ in
             let urls = (result as? [String] ?? []).compactMap(URL.init(string:))
-            FaviconStore.shared.offer(urls, host: host)
+            FaviconStore.shared.offer(urls, for: site)
         }
     }
 }
@@ -812,9 +814,15 @@ extension PanelViewController: WKUIDelegate {
                  createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction,
                  windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // Plain target=_blank links go to the default browser.
+        // Plain target=_blank links go to the default browser, except ones that stay on the
+        // page's own site or go through Google's account chooser (e.g. switching to another
+        // signed-in account), which load in place so the switch happens here.
         if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-            NSWorkspace.shared.open(url)
+            if Site.isSameSite(url.host, webView.url?.host) || url.host == "accounts.google.com" {
+                webView.load(navigationAction.request)
+            } else {
+                NSWorkspace.shared.open(url)
+            }
             return nil
         }
         // Script-opened windows (e.g. OAuth sign-in) get a real popup that keeps window.opener.
