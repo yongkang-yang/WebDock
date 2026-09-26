@@ -5,7 +5,7 @@ A macOS menu bar app that keeps your favorite web apps — ChatGPT, Claude, Gemi
 ## Features
 
 - **Menu bar panel** — click the globe icon for a rounded Liquid Glass panel that drops down from the menu bar.
-- **Start page** — clock, greeting, a Google search box (or type a URL), your sites as tiles, and a "Jump back in" list of recent pages.
+- **Start page** — clock, greeting, a Google search box (or type a URL), your sites as tiles (drag to rearrange), and a "Jump back in" list of recent pages.
 - **Sidebar** — site icons that auto-hide (hover the left edge) or stay pinned. `⌘1`–`⌘9` switch sites, `⌘T` opens a fresh start page.
 - **Stays logged in** — each site keeps its cookies; Google sign-in works in the embedded browser.
 - **Memory-friendly** — sites load only when opened; pages off screen for 3 minutes are released and resume where you left off.

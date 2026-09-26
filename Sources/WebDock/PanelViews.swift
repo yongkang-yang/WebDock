@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The latest page seen on a site, for the start page's "Jump back in" list.
 struct RecentPage: Codable, Identifiable, Equatable {
@@ -72,6 +73,8 @@ final class PanelModel: ObservableObject {
     var onSetDarkMode: (UUID, Site.DarkMode) -> Void = { _, _ in }
     var onSearch: (String) -> Void = { _ in }
     var onAddSite: (Site) -> Void = { _ in }
+    /// Moves the first site to where the second one is, as a drag over it does.
+    var onMoveSite: (UUID, UUID) -> Void = { _, _ in }
     /// The page on screen as an address and a suggested name, for "Add Page as Site".
     var pageForAdding: () -> (url: String, name: String) = { ("", "") }
     var onShowFind: () -> Void = {}
@@ -539,6 +542,7 @@ struct StartPageView: View {
     @ObservedObject private var favicons = FaviconStore.shared
     @State private var query = ""
     @State private var isAdding = false
+    @State private var draggingID: UUID?
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
@@ -630,18 +634,10 @@ struct StartPageView: View {
 
     // MARK: Sites
 
-    /// Open sites first, then the rest; each group by name, A to Z.
-    private var orderedSites: [Site] {
-        model.sites.sorted { a, b in
-            let (liveA, liveB) = (model.liveIDs.contains(a.id), model.liveIDs.contains(b.id))
-            if liveA != liveB { return liveA }
-            return a.name.localizedStandardCompare(b.name) == .orderedAscending
-        }
-    }
-
     private var siteGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 10)], spacing: 10) {
-            ForEach(orderedSites) { site in
+            // The user's own order, the same as the rail's; drag a tile to move it.
+            ForEach(model.sites) { site in
                 tile(label: site.name, isLive: model.liveIDs.contains(site.id)) {
                     model.onSelect(site.id)
                 } glyph: {
@@ -654,6 +650,12 @@ struct StartPageView: View {
                     }
                 }
                 .onAppear { favicons.load(for: site) }
+                .onDrag {
+                    draggingID = site.id
+                    return NSItemProvider(object: site.id.uuidString as NSString)
+                }
+                .onDrop(of: [.text], delegate: TileDropDelegate(target: site.id, dragging: $draggingID,
+                                                                move: model.onMoveSite))
             }
             tile(label: StartText.t("Add Site", "添加网站")) {
                 isAdding = true
@@ -701,26 +703,29 @@ struct StartPageView: View {
                                                  @ViewBuilder glyph: () -> Glyph,
                                                  tint: () -> Color?,
                                                  @ViewBuilder corner: () -> Corner) -> some View {
-        Button(action: action) {
-            VStack(spacing: 7) {
-                glyph()
-                    .frame(width: Self.tileSize, height: Self.tileSize)
-                    .glassSurface(in: RoundedRectangle(cornerRadius: Self.tileCornerRadius, style: .continuous),
-                                  tint: tint(), interactive: true)
-                    .overlay(alignment: .topTrailing, content: corner)
-                VStack(spacing: 4) {
-                    Text(label)
-                        .font(.system(size: 12))
-                        .lineLimit(1)
-                    Circle()
-                        .fill(isLive ? Color.primary.opacity(0.55) : .clear)
-                        .frame(width: 4, height: 4)
-                }
+        // Not a Button: a button keeps tracking the mouse after the press, so dragging a tile
+        // to rearrange it would never start.
+        VStack(spacing: 7) {
+            glyph()
+                .frame(width: Self.tileSize, height: Self.tileSize)
+                .glassSurface(in: RoundedRectangle(cornerRadius: Self.tileCornerRadius, style: .continuous),
+                              tint: tint(), interactive: true)
+                .overlay(alignment: .topTrailing, content: corner)
+            VStack(spacing: 4) {
+                Text(label)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                Circle()
+                    .fill(isLive ? Color.primary.opacity(0.55) : .clear)
+                    .frame(width: 4, height: 4)
             }
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, action)
     }
 
     // MARK: Recents
@@ -779,5 +784,26 @@ struct StartPageView: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
         return formatter.localizedString(for: date, relativeTo: now)
+    }
+}
+
+/// Reorders start page tiles live while one is dragged over another, like icons in the Dock.
+private struct TileDropDelegate: DropDelegate {
+    let target: UUID
+    @Binding var dragging: UUID?
+    let move: (UUID, UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let dragging, dragging != target else { return }
+        withAnimation(.easeInOut(duration: 0.2)) { move(dragging, target) }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        return true
     }
 }

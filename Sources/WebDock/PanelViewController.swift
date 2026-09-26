@@ -173,6 +173,7 @@ final class PanelViewController: NSViewController {
         model.onOpenInBrowser = { [weak self] id in self?.openInBrowser(id: id) }
         model.onOpenInWindow = { [weak self] id in self?.openInWindow(id: id) }
         model.onAddSite = { [weak self] site in self?.addSite(site) }
+        model.onMoveSite = { [weak self] id, target in self?.moveSite(id: id, to: target) }
         model.pageForAdding = { [weak self] in self?.pageForAdding() ?? ("", "") }
         model.onShowFind = { [weak self] in self?.showFind(nil) }
         model.onFind = { [weak self] query, backwards, restart in
@@ -1041,6 +1042,14 @@ final class PanelViewController: NSViewController {
         guard let webView = currentWebView, let url = webView.url else { return ("", "") }
         let title = webView.title.map(SiteTitle.brand(fromTitle:)) ?? ""
         return (url.absoluteString, title.isEmpty ? SiteTitle.fromHost(url) : title)
+    }
+
+    private func moveSite(id: UUID, to target: UUID) {
+        var sites = SiteStore.shared.sites
+        guard let from = sites.firstIndex(where: { $0.id == id }),
+              let to = sites.firstIndex(where: { $0.id == target }), from != to else { return }
+        sites.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        SiteStore.shared.sites = sites
     }
 
     private func addSite(_ site: Site) {
