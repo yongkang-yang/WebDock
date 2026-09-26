@@ -494,7 +494,7 @@ final class PanelViewController: NSViewController {
 
     private func syncNavigationState() {
         let webView = currentWebView
-        var pageColor: NSColor? = webView.flatMap { $0.themeColor ?? $0.underPageBackgroundColor }
+        var pageColor: NSColor? = webView.flatMap(Self.pageColor(of:))
         // The page is inverted by CSS; WebKit still reports its original, light color.
         if let id = selectedID, loadedForceDark[id] == true, isSystemDark {
             pageColor = pageColor.flatMap(Self.inverted)
@@ -524,11 +524,25 @@ final class PanelViewController: NSViewController {
         webCard.layer?.backgroundColor = color?.cgColor
 
         if let color {
-            let luminance = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
-            view.appearance = NSAppearance(named: luminance < 0.5 ? .darkAqua : .aqua)
+            view.appearance = NSAppearance(named: Self.isDark(color) ? .darkAqua : .aqua)
         } else {
             view.appearance = nil
         }
+    }
+
+    /// The page's theme color, unless it's light over a dark page: a theme-color declared once,
+    /// without a dark-mode variant, stays white when the page turns dark (Rednote does this).
+    /// A dark theme color over a light page is left alone; that's usually a deliberate dark header.
+    private static func pageColor(of webView: WKWebView) -> NSColor? {
+        let background = webView.underPageBackgroundColor
+        guard let theme = webView.themeColor else { return background }
+        if let background, !isDark(theme), isDark(background) { return background }
+        return theme
+    }
+
+    private static func isDark(_ color: NSColor) -> Bool {
+        guard let color = color.usingColorSpace(.sRGB) else { return false }
+        return 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent < 0.5
     }
 
     // MARK: - Layout
