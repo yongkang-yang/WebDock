@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The latest page seen on a site, for the start page's "Jump back in" list.
 struct RecentPage: Codable, Identifiable, Equatable {
@@ -542,7 +541,11 @@ struct StartPageView: View {
     @ObservedObject private var favicons = FaviconStore.shared
     @State private var query = ""
     @State private var isAdding = false
+    /// The tile being dragged, where the pointer is, and where on the tile it was grabbed.
     @State private var draggingID: UUID?
+    @State private var dragLocation: CGPoint = .zero
+    @State private var grabOffset: CGSize = .zero
+    @State private var tileFrames: [UUID: CGRect] = [:]
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
@@ -650,12 +653,17 @@ struct StartPageView: View {
                     }
                 }
                 .onAppear { favicons.load(for: site) }
-                .onDrag {
-                    draggingID = site.id
-                    return NSItemProvider(object: site.id.uuidString as NSString)
+                .scaleEffect(draggingID == site.id ? 1.08 : 1)
+                .offset(dragOffset(for: site.id))
+                // Measured outside the offset: the tile's place in the grid, not where it's drawn.
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: TileFramesKey.self,
+                                               value: [site.id: proxy.frame(in: .named(Self.gridSpace))])
+                    }
                 }
-                .onDrop(of: [.text], delegate: TileDropDelegate(target: site.id, dragging: $draggingID,
-                                                                move: model.onMoveSite))
+                .zIndex(draggingID == site.id ? 1 : 0)
+                .gesture(tileDrag(site.id))
             }
             tile(label: StartText.t("Add Site", "添加网站")) {
                 isAdding = true
@@ -679,6 +687,39 @@ struct StartPageView: View {
                 .frame(width: 320)
             }
         }
+        .coordinateSpace(name: Self.gridSpace)
+        .onPreferenceChange(TileFramesKey.self) { tileFrames = $0 }
+    }
+
+    private static let gridSpace = "siteGrid"
+
+    /// Drawn where the pointer holds it, while the grid moves its slot under it.
+    private func dragOffset(for id: UUID) -> CGSize {
+        guard draggingID == id, let frame = tileFrames[id] else { return .zero }
+        return CGSize(width: dragLocation.x - grabOffset.width - frame.minX,
+                      height: dragLocation.y - grabOffset.height - frame.minY)
+    }
+
+    /// Dragging a tile over another moves it into that slot, like icons in the Dock. A plain
+    /// SwiftUI gesture rather than drag and drop: AppKit looks for drop targets across the
+    /// whole window, where the hidden web views stacked over the start page get in the way.
+    private func tileDrag(_ id: UUID) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.gridSpace))
+            .onChanged { value in
+                if draggingID != id {
+                    guard let frame = tileFrames[id] else { return }
+                    grabOffset = CGSize(width: value.startLocation.x - frame.minX,
+                                        height: value.startLocation.y - frame.minY)
+                    withAnimation(.easeOut(duration: 0.15)) { draggingID = id }
+                }
+                dragLocation = value.location
+                if let target = tileFrames.first(where: { $0.key != id && $0.value.contains(value.location) })?.key {
+                    withAnimation(.easeInOut(duration: 0.2)) { model.onMoveSite(id, target) }
+                }
+            }
+            .onEnded { _ in
+                withAnimation(.easeOut(duration: 0.2)) { draggingID = nil }
+            }
     }
 
     /// An icon fills the whole tile, like an app icon; a site without one shows its initial.
@@ -787,23 +828,10 @@ struct StartPageView: View {
     }
 }
 
-/// Reorders start page tiles live while one is dragged over another, like icons in the Dock.
-private struct TileDropDelegate: DropDelegate {
-    let target: UUID
-    @Binding var dragging: UUID?
-    let move: (UUID, UUID) -> Void
+private struct TileFramesKey: PreferenceKey {
+    static let defaultValue: [UUID: CGRect] = [:]
 
-    func dropEntered(info: DropInfo) {
-        guard let dragging, dragging != target else { return }
-        withAnimation(.easeInOut(duration: 0.2)) { move(dragging, target) }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        dragging = nil
-        return true
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { $1 }
     }
 }
