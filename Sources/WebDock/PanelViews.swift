@@ -22,6 +22,14 @@ struct Toast: Identifiable, Equatable {
     static func == (a: Toast, b: Toast) -> Bool { a.id == b.id }
 }
 
+/// "Save password?" for a login just typed into a page; the password itself stays in the controller.
+struct LoginPrompt: Identifiable, Equatable {
+    let id = UUID()
+    var siteName: String
+    var account: String
+    var isUpdate: Bool
+}
+
 /// State the SwiftUI chrome reads; PanelViewController owns the web views and fills this in.
 final class PanelModel: ObservableObject {
     /// The start page: a Google search box plus the site grid; searching turns it into a Google page.
@@ -51,6 +59,7 @@ final class PanelModel: ObservableObject {
     /// The current page's zoom; 1 is actual size.
     @Published var zoom: Double = 1
     @Published var toast: Toast?
+    @Published var loginPrompt: LoginPrompt?
     @Published var isFindVisible = false
     @Published var findQuery = ""
     @Published var findNotFound = false
@@ -91,6 +100,8 @@ final class PanelModel: ObservableObject {
     /// Bumped to move keyboard focus into the start page's search field.
     @Published var searchFocusRequest = 0
     var onRailHover: (Bool) -> Void = { _ in }
+    /// Whether to save the login in `loginPrompt`.
+    var onAnswerLoginPrompt: (Bool) -> Void = { _ in }
 
     enum ZoomChange { case zoomIn, zoomOut, reset }
 
@@ -624,6 +635,50 @@ struct ToastView: View {
             .frame(maxWidth: 360)
             .glassSurface(in: Capsule(), tint: model.pageColor.map { Color(nsColor: $0).opacity(0.85) })
             .fixedSize()
+        }
+    }
+}
+
+/// A banner over the top of the page offering to save a login, like Safari's; it stays until
+/// answered, since a toast at the bottom was easy to miss.
+struct LoginPromptView: View {
+    @ObservedObject var model: PanelModel
+
+    var body: some View {
+        if let prompt = model.loginPrompt {
+            HStack(spacing: 12) {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.accentColor))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(prompt.isUpdate ? "Update Saved Password?" : "Save Password?")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(prompt.account.isEmpty ? prompt.siteName : "\(prompt.account) · \(prompt.siteName)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(minWidth: 140, alignment: .leading)
+                Spacer(minLength: 8)
+                Button("Not Now") { model.onAnswerLoginPrompt(false) }
+                    .controlSize(.large)
+                Button(prompt.isUpdate ? "Update" : "Save") { model.onAnswerLoginPrompt(true) }
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: 440)
+            .glassSurface(in: RoundedRectangle(cornerRadius: 20, style: .continuous),
+                          tint: model.pageColor.map { Color(nsColor: $0).opacity(0.85) })
+            .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
+            .fixedSize()
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .id(prompt.id)
         }
     }
 }

@@ -39,6 +39,11 @@ final class PanelViewController: NSViewController {
     private static let zoomSteps: [Double] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
     private let downloads = DownloadManager()
     private var toastWork: DispatchWorkItem?
+    /// See `recentUsername(for:)`.
+    fileprivate var typedUsernames: [String: (username: String, date: Date)] = [:]
+    /// Which site each web view, sign-in popups included, belongs to, for its saved logins.
+    fileprivate let webViewSites = NSMapTable<WKWebView, NSUUID>.weakToStrongObjects()
+    fileprivate var pendingLogin: (login: LoginKeychain.Login, password: String)?
     /// Pages moved out of the panel into windows of their own.
     private var detachedWindows: [(window: NSWindow, observation: NSKeyValueObservation)] = []
     /// The page whose video is fullscreen, its window, and how to put it back where it was.
@@ -75,7 +80,9 @@ final class PanelViewController: NSViewController {
     private var popupWindows: [NSWindow] = []
     private var selectedID: UUID?
     /// A pinned page is on screen, so clicking elsewhere shouldn't close the panel.
-    var keepsPanelOpen: Bool { selectedID.map(model.pinnedIDs.contains) ?? false }
+    var keepsPanelOpen: Bool {
+        PasswordGate.isAuthenticating || (selectedID.map(model.pinnedIDs.contains) ?? false)
+    }
     private var isPanelVisible = false
     private var storeSubscription: AnyCancellable?
     private var folderSubscription: AnyCancellable?
@@ -93,6 +100,8 @@ final class PanelViewController: NSViewController {
         findBar.sizingOptions = [.intrinsicContentSize]
         let toast = PassThroughHostingView(rootView: ToastView(model: model))
         toast.sizingOptions = [.intrinsicContentSize]
+        let loginPrompt = PassThroughHostingView(rootView: LoginPromptView(model: model))
+        loginPrompt.sizingOptions = [.intrinsicContentSize]
         let header = NSHostingView(rootView: HeaderView(model: model))
         header.sizingOptions = []
 
@@ -116,7 +125,7 @@ final class PanelViewController: NSViewController {
         railHotZone.onHoverChange = { [weak self] inside in self?.railHoverChanged(inside, fromHotZone: true) }
 
         // Order matters: the floating rail sits over the page, the hot zone over everything.
-        for subview in [header, webCard, findBar, toast, rail, railHotZone] as [NSView] {
+        for subview in [header, webCard, findBar, toast, loginPrompt, rail, railHotZone] as [NSView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(subview)
         }
@@ -141,6 +150,9 @@ final class PanelViewController: NSViewController {
             findBar.topAnchor.constraint(equalTo: webCard.topAnchor, constant: 10),
             findBar.trailingAnchor.constraint(equalTo: webCard.trailingAnchor, constant: -10),
 
+            loginPrompt.centerXAnchor.constraint(equalTo: webCard.centerXAnchor),
+            loginPrompt.topAnchor.constraint(equalTo: webCard.topAnchor, constant: 12),
+            loginPrompt.widthAnchor.constraint(lessThanOrEqualTo: webCard.widthAnchor, constant: -24),
             toast.centerXAnchor.constraint(equalTo: webCard.centerXAnchor),
             toast.bottomAnchor.constraint(equalTo: webCard.bottomAnchor, constant: -14),
             toast.widthAnchor.constraint(lessThanOrEqualTo: webCard.widthAnchor, constant: -24),
@@ -211,6 +223,8 @@ final class PanelViewController: NSViewController {
             SiteStore.shared.sites[index].darkMode = mode
         }
         model.onRailHover = { [weak self] inside in self?.railHoverChanged(inside, fromHotZone: false) }
+        model.onAnswerLoginPrompt = { [weak self] save in self?.answerLoginPrompt(save: save) }
+        PasswordGate.startObserving()
         pageZooms = UserDefaults.standard.dictionary(forKey: pageZoomsKey) as? [String: Double] ?? [:]
         UserDefaults.standard.removeObject(forKey: "siteUsage")
         downloads.onEvent = { [weak self] event in self?.downloadEvent(event) }
@@ -348,6 +362,7 @@ final class PanelViewController: NSViewController {
             }
         }
         sites = newSites
+        LoginKeychain.removeAll(except: Set(newSites.map(\.id) + [homeID]))
 
         // Drop web views whose site was removed, or whose URL or layout changed.
         for id in webViews.keys where id != homeID {
@@ -421,6 +436,9 @@ final class PanelViewController: NSViewController {
         VideoPresentation.enablePictureInPicture(config.preferences)
         config.userContentController.addUserScript(VideoPresentation.script)
         config.userContentController.add(WeakScriptMessageHandler(self), name: VideoPresentation.messageName)
+        config.userContentController.addUserScript(Autofill.script)
+        config.userContentController.add(WeakScriptMessageHandler(self), contentWorld: Autofill.world,
+                                         name: Autofill.messageName)
         let forceDark = forcesDark(site)
         if forceDark {
             config.userContentController.addUserScript(Self.forceDarkScript)
@@ -457,6 +475,7 @@ final class PanelViewController: NSViewController {
             },
         ]
         webViews[id] = webView
+        webViewSites.setObject(id as NSUUID, forKey: webView)
         loadedURLs[id] = site.url
         loadedMobile[id] = mobile
         loadedForceDark[id] = forceDark
@@ -1125,6 +1144,10 @@ final class PanelViewController: NSViewController {
 
 extension PanelViewController: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == Autofill.messageName {
+            handleAutofill(message)
+            return
+        }
         guard message.name == VideoPresentation.messageName,
               let body = message.body as? [String: Any], let webView = message.webView else { return }
         if let on = body["fullscreen"] as? Bool, message.frameInfo.isMainFrame {
@@ -1137,6 +1160,75 @@ extension PanelViewController: WKScriptMessageHandler {
                 pictureInPicture.remove(ObjectIdentifier(webView))
             }
         }
+    }
+}
+
+// MARK: - Autofill
+
+extension PanelViewController {
+    /// A login belongs to the site whose page (or sign-in popup) the form is in, and to the exact
+    /// host of the frame; only https frames take part.
+    fileprivate func handleAutofill(_ message: WKScriptMessage) {
+        let origin = message.frameInfo.securityOrigin
+        guard origin.protocol == "https", !origin.host.isEmpty, let webView = message.webView,
+              let siteID = webViewSites.object(forKey: webView) as UUID?,
+              let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        let host = origin.host.lowercased()
+        let key = "\(siteID)\n\(host)"
+        let username = (body["username"] as? String) ?? ""
+        Autofill.log.notice("\(type, privacy: .public) from \(host, privacy: .public)")
+        switch type {
+        case "fields":
+            // A username just typed on a first sign-in step goes first.
+            let typed = recentUsername(for: key)
+            let accounts = LoginKeychain.logins(siteID: siteID, host: host).map(\.account)
+                .sorted { $0 == typed && $1 != typed }
+            let siteName = site(for: siteID)?.name ?? host
+            Autofill.offer(accounts: accounts, siteName: siteName, to: message.frameInfo, in: webView)
+        case "choose":
+            let login = LoginKeychain.Login(siteID: siteID, host: host, account: username)
+            let frame = message.frameInfo
+            let siteName = site(for: siteID)?.name ?? host
+            PasswordGate.authenticate(reason: "fill in your saved password for \(siteName)") { [weak webView] allowed in
+                guard allowed, let webView, let password = LoginKeychain.password(for: login) else { return }
+                Autofill.fill(username: username, password: password, in: frame, of: webView)
+            }
+        case "username":
+            typedUsernames[key] = (username, Date())
+        case "submit":
+            guard let password = body["password"] as? String, !password.isEmpty else { return }
+            let account = username.isEmpty ? recentUsername(for: key) ?? "" : username
+            offerToSaveLogin(LoginKeychain.Login(siteID: siteID, host: host, account: account), password: password)
+        default:
+            break
+        }
+    }
+
+    /// A username typed on a sign-in's first step, for the password step that follows.
+    private func recentUsername(for key: String) -> String? {
+        guard let typed = typedUsernames[key], Date().timeIntervalSince(typed.date) < 10 * 60 else { return nil }
+        return typed.username
+    }
+
+    /// Asks in a banner over the top of the page, which stays until answered, like Safari's.
+    /// The password waits here, not in the model the views read.
+    private func offerToSaveLogin(_ login: LoginKeychain.Login, password: String) {
+        let saved = LoginKeychain.password(for: login)
+        guard saved != password else { return }
+        pendingLogin = (login, password)
+        let siteName = site(for: login.siteID)?.name ?? login.host
+        withAnimation(.easeOut(duration: 0.2)) {
+            model.loginPrompt = LoginPrompt(siteName: siteName, account: login.account, isUpdate: saved != nil)
+        }
+    }
+
+    fileprivate func answerLoginPrompt(save: Bool) {
+        if save, let (login, password) = pendingLogin {
+            LoginKeychain.save(login, password: password)
+            showToast(Toast(symbol: "checkmark.circle", message: "Password saved"), for: 2)
+        }
+        pendingLogin = nil
+        withAnimation(.easeOut(duration: 0.2)) { model.loginPrompt = nil }
     }
 }
 
@@ -1267,6 +1359,9 @@ extension PanelViewController: WKUIDelegate {
         // Script-opened windows (e.g. OAuth sign-in) get a real popup that keeps window.opener.
         let popup = WKWebView(frame: NSRect(x: 0, y: 0, width: 500, height: 640), configuration: configuration)
         popup.customUserAgent = userAgent
+        if let siteID = webViewSites.object(forKey: webView) {
+            webViewSites.setObject(siteID, forKey: popup)
+        }
         popup.uiDelegate = self
         popup.navigationDelegate = self  // for downloads
 

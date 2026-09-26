@@ -7,6 +7,7 @@ func makeSettingsWindow() -> NSWindow {
     tabs.tabStyle = .toolbar
     tabs.addTabViewItem(settingsTab("General", symbol: "gearshape", GeneralSettingsView()))
     tabs.addTabViewItem(settingsTab("Sites", symbol: "square.grid.2x2", SitesSettingsView()))
+    tabs.addTabViewItem(settingsTab("Passwords", symbol: "key", PasswordsSettingsView()))
     tabs.addTabViewItem(settingsTab("Shortcuts", symbol: "keyboard", ShortcutsSettingsView()))
 
     let window = NSWindow(contentViewController: tabs)
@@ -310,6 +311,89 @@ private struct SiteEditor: View {
         if site?.url != url {
             update { $0.url = url }
         }
+    }
+}
+
+// MARK: - Passwords
+
+/// The logins WebDock fills in, as saved from the pages' sign-in forms. Passwords stay in the
+/// keychain and aren't shown here.
+private struct PasswordsSettingsView: View {
+    @State private var logins: [LoginKeychain.Login] = []
+    @State private var selection: LoginKeychain.Login.ID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(spacing: 0) {
+                List(selection: $selection) {
+                    ForEach(logins) { login in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(login.account.isEmpty ? "No username" : login.account)
+                                .lineLimit(1)
+                            Text("\(siteName(login.siteID)) · \(login.host)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        .padding(.vertical, 2)
+                        .tag(login.id)
+                    }
+                    .onDelete { offsets in delete(offsets.map { logins[$0] }) }
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: false))
+                .overlay {
+                    if logins.isEmpty {
+                        Text("No Saved Passwords")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Divider()
+                HStack(spacing: 0) {
+                    Button {
+                        if let login = logins.first(where: { $0.id == selection }) {
+                            delete([login])
+                        }
+                    } label: {
+                        Image(systemName: "minus")
+                            .frame(width: 26, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Delete Password")
+                    .disabled(selection == nil)
+                    Spacer()
+                }
+                .frame(height: 26)
+                .background(.background)
+            }
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.1)))
+
+            Text("When you sign in to a page, WebDock offers to save the password. Next time, click the sign-in field on the same site and choose the account; it fills in after Touch ID or your Mac's password, and you still press Return to sign in. Passwords are kept in your login keychain.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(20)
+        .frame(width: 520, height: 400)
+        .onAppear(perform: reload)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in reload() }
+    }
+
+    private func delete(_ doomed: [LoginKeychain.Login]) {
+        PasswordGate.authenticate(reason: "delete a saved password") { allowed in
+            guard allowed else { return }
+            doomed.forEach(LoginKeychain.delete)
+            reload()
+        }
+    }
+
+    private func siteName(_ id: UUID) -> String {
+        SiteStore.shared.sites.first { $0.id == id }?.name ?? "Google"
+    }
+
+    private func reload() {
+        logins = LoginKeychain.logins()
+        if !logins.contains(where: { $0.id == selection }) { selection = nil }
     }
 }
 
