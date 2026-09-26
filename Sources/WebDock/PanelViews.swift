@@ -640,9 +640,9 @@ struct StartPageView: View {
     }
 
     private var siteGrid: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 10)], spacing: 16) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 10)], spacing: 10) {
             ForEach(orderedSites) { site in
-                tile(label: site.name) {
+                tile(label: site.name, isLive: model.liveIDs.contains(site.id)) {
                     model.onSelect(site.id)
                 } glyph: {
                     siteTileGlyph(site)
@@ -651,11 +651,6 @@ struct StartPageView: View {
                 } corner: {
                     if let badge = model.badges[site.id] {
                         BadgeView(count: badge).offset(x: 4, y: -4)
-                    } else if model.liveIDs.contains(site.id) {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 7, height: 7)
-                            .offset(x: -5, y: 5)
                     }
                 }
                 .onAppear { favicons.load(for: site) }
@@ -698,7 +693,10 @@ struct StartPageView: View {
     private static let tileSize: CGFloat = 58
     private static let tileCornerRadius: CGFloat = 18
 
+    /// A running site gets a dock-style dot under its name, like its rail slot; on the icon
+    /// itself the dot would vanish into icons of its own color.
     private func tile<Glyph: View, Corner: View>(label: String,
+                                                 isLive: Bool = false,
                                                  action: @escaping () -> Void,
                                                  @ViewBuilder glyph: () -> Glyph,
                                                  tint: () -> Color?,
@@ -710,9 +708,14 @@ struct StartPageView: View {
                     .glassSurface(in: RoundedRectangle(cornerRadius: Self.tileCornerRadius, style: .continuous),
                                   tint: tint(), interactive: true)
                     .overlay(alignment: .topTrailing, content: corner)
-                Text(label)
-                    .font(.system(size: 12))
-                    .lineLimit(1)
+                VStack(spacing: 4) {
+                    Text(label)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                    Circle()
+                        .fill(isLive ? Color.primary.opacity(0.55) : .clear)
+                        .frame(width: 4, height: 4)
+                }
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
