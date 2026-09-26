@@ -47,8 +47,6 @@ final class PanelModel: ObservableObject {
     @Published var pageColor: NSColor?
     /// Unread counts that live pages show in their titles, e.g. "Inbox (3)" or "(3) Home / X".
     @Published var badges: [UUID: Int] = [:]
-    /// How much each site has been opened lately, for ordering the start page.
-    @Published var usage: [UUID: Double] = [:]
     /// The current page's zoom; 1 is actual size.
     @Published var zoom: Double = 1
     @Published var toast: Toast?
@@ -256,6 +254,9 @@ struct SiteGlyph: View {
     let icon: NSImage?
     let plateColor: NSColor?
     let size: CGFloat
+    var cornerRadius: CGFloat?
+    /// How far a bare glyph sits in from its plate's edge, as a fraction of the size.
+    var plateInset: CGFloat = 0.12
 
     var body: some View {
         if let icon {
@@ -263,10 +264,10 @@ struct SiteGlyph: View {
                 .resizable()
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
-                .padding(plateColor == nil ? 0 : size * 0.12)
+                .padding(plateColor == nil ? 0 : size * plateInset)
                 .frame(width: size, height: size)
                 .background(plateColor.map { Color(nsColor: $0) } ?? .clear)
-                .clipShape(RoundedRectangle(cornerRadius: size / 4, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius ?? size / 4, style: .continuous))
         } else {
             Text(site.name.prefix(1).uppercased())
                 .font(.system(size: size * 0.75, weight: .semibold, design: .rounded))
@@ -534,11 +535,8 @@ private enum StartText {
 /// What the panel shows on launch and on ⌘T: a greeting, a search box, the user's sites,
 /// and the pages they were last on.
 struct StartPageView: View {
-    static let sortsByUsageKey = "sortStartPageByUsage"
-
     @ObservedObject var model: PanelModel
     @ObservedObject private var favicons = FaviconStore.shared
-    @AppStorage(StartPageView.sortsByUsageKey) private var sortsByUsage = true
     @State private var query = ""
     @State private var isAdding = false
     @FocusState private var isSearchFocused: Bool
@@ -632,15 +630,13 @@ struct StartPageView: View {
 
     // MARK: Sites
 
-    /// The user's order, or most used first; sites used equally keep the user's order.
+    /// Open sites first, then the rest; each group by name, A to Z.
     private var orderedSites: [Site] {
-        guard sortsByUsage else { return model.sites }
-        return model.sites.enumerated()
-            .sorted { a, b in
-                let (ua, ub) = (model.usage[a.element.id] ?? 0, model.usage[b.element.id] ?? 0)
-                return abs(ua - ub) > 0.01 ? ua > ub : a.offset < b.offset
-            }
-            .map(\.element)
+        model.sites.sorted { a, b in
+            let (liveA, liveB) = (model.liveIDs.contains(a.id), model.liveIDs.contains(b.id))
+            if liveA != liveB { return liveA }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
     }
 
     private var siteGrid: some View {
@@ -649,8 +645,7 @@ struct StartPageView: View {
                 tile(label: site.name) {
                     model.onSelect(site.id)
                 } glyph: {
-                    SiteGlyph(site: site, icon: favicons.icon(for: site),
-                              plateColor: favicons.plateColor(for: site), size: 28)
+                    siteTileGlyph(site)
                 } tint: {
                     favicons.accentColor(for: site).map { Color(nsColor: $0).opacity(0.28) }
                 } corner: {
@@ -689,6 +684,20 @@ struct StartPageView: View {
         }
     }
 
+    /// An icon fills the whole tile, like an app icon; a site without one shows its initial.
+    @ViewBuilder
+    private func siteTileGlyph(_ site: Site) -> some View {
+        if let icon = favicons.icon(for: site) {
+            SiteGlyph(site: site, icon: icon, plateColor: favicons.plateColor(for: site),
+                      size: Self.tileSize, cornerRadius: Self.tileCornerRadius, plateInset: 0.22)
+        } else {
+            SiteGlyph(site: site, icon: nil, plateColor: nil, size: 28)
+        }
+    }
+
+    private static let tileSize: CGFloat = 58
+    private static let tileCornerRadius: CGFloat = 18
+
     private func tile<Glyph: View, Corner: View>(label: String,
                                                  action: @escaping () -> Void,
                                                  @ViewBuilder glyph: () -> Glyph,
@@ -697,8 +706,8 @@ struct StartPageView: View {
         Button(action: action) {
             VStack(spacing: 7) {
                 glyph()
-                    .frame(width: 58, height: 58)
-                    .glassSurface(in: RoundedRectangle(cornerRadius: 18, style: .continuous),
+                    .frame(width: Self.tileSize, height: Self.tileSize)
+                    .glassSurface(in: RoundedRectangle(cornerRadius: Self.tileCornerRadius, style: .continuous),
                                   tint: tint(), interactive: true)
                     .overlay(alignment: .topTrailing, content: corner)
                 Text(label)

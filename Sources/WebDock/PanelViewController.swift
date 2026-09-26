@@ -37,10 +37,6 @@ final class PanelViewController: NSViewController {
     /// Zoom per site, when it isn't 100%.
     private var pageZooms: [String: Double] = [:]
     private static let zoomSteps: [Double] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
-    private let usageKey = "siteUsage"
-    /// Per site: a score that halves every week, and when it was last bumped.
-    private var usageRecords: [String: [Double]] = [:]
-    private static let usageHalfLife: TimeInterval = 7 * 24 * 3600
     private let downloads = DownloadManager()
     private var toastWork: DispatchWorkItem?
     /// Pages moved out of the panel into windows of their own.
@@ -166,7 +162,6 @@ final class PanelViewController: NSViewController {
         applyRailMode()
 
         model.onSelect = { [weak self] id in
-            self?.recordUse(of: id)
             self?.select(id: id)
             if self?.model.isRailPinned == false {
                 self?.hideRailWork?.cancel()
@@ -211,8 +206,7 @@ final class PanelViewController: NSViewController {
         }
         model.onRailHover = { [weak self] inside in self?.railHoverChanged(inside, fromHotZone: false) }
         pageZooms = UserDefaults.standard.dictionary(forKey: pageZoomsKey) as? [String: Double] ?? [:]
-        usageRecords = UserDefaults.standard.dictionary(forKey: usageKey) as? [String: [Double]] ?? [:]
-        publishUsage()
+        UserDefaults.standard.removeObject(forKey: "siteUsage")
         downloads.onEvent = { [weak self] event in self?.downloadEvent(event) }
 
         selectedID = homeID
@@ -360,9 +354,7 @@ final class PanelViewController: NSViewController {
         resolvedLayouts = resolvedLayouts.filter { validKeys.contains($0.key) }
         resolvedDarkModes = resolvedDarkModes.filter { validKeys.contains($0.key) }
         pageZooms = pageZooms.filter { validKeys.contains($0.key) }
-        usageRecords = usageRecords.filter { validKeys.contains($0.key) }
         UserDefaults.standard.set(pageZooms, forKey: pageZoomsKey)
-        UserDefaults.standard.set(usageRecords, forKey: usageKey)
         UserDefaults.standard.set(resolvedDarkModes, forKey: resolvedDarkModesKey)
         UserDefaults.standard.set(lastURLs, forKey: lastURLsKey)
         UserDefaults.standard.set(resolvedLayouts, forKey: resolvedLayoutsKey)
@@ -848,7 +840,6 @@ final class PanelViewController: NSViewController {
     /// ⌘1–⌘9 from the main menu; the menu item's tag is the site's index.
     @objc func selectSiteByNumber(_ sender: NSMenuItem) {
         guard sites.indices.contains(sender.tag) else { return }
-        recordUse(of: sites[sender.tag].id)
         select(id: sites[sender.tag].id)
     }
 
@@ -1020,33 +1011,6 @@ final class PanelViewController: NSViewController {
         }
     }
 
-    // MARK: - Usage
-
-    /// Each open counts one; older opens fade with a one-week half-life.
-    private func recordUse(of id: UUID) {
-        guard id != homeID, id != selectedID || !isPanelVisible else { return }
-        let now = Date().timeIntervalSince1970
-        usageRecords[id.uuidString] = [decayedUsage(usageRecords[id.uuidString], now: now) + 1, now]
-        UserDefaults.standard.set(usageRecords, forKey: usageKey)
-        publishUsage()
-    }
-
-    private func decayedUsage(_ record: [Double]?, now: TimeInterval) -> Double {
-        guard let record, record.count == 2 else { return 0 }
-        return record[0] * pow(0.5, (now - record[1]) / Self.usageHalfLife)
-    }
-
-    private func publishUsage() {
-        let now = Date().timeIntervalSince1970
-        var usage: [UUID: Double] = [:]
-        for (key, record) in usageRecords {
-            if let id = UUID(uuidString: key) {
-                usage[id] = decayedUsage(record, now: now)
-            }
-        }
-        model.usage = usage
-    }
-
     // MARK: - Toasts
 
     private func showToast(_ toast: Toast, for duration: TimeInterval = 4) {
@@ -1195,7 +1159,8 @@ extension PanelViewController: WKNavigationDelegate {
         downloads.track(download)
     }
 
-    /// Hands the icons the page declares to the favicon store, apple-touch-icon first, then largest.
+    /// Hands the icons the page declares, in its links and its web app manifest, to the favicon
+    /// store, largest first.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let id = webViews.first(where: { $0.value === webView })?.key,
               let site = site(for: id),
@@ -1206,18 +1171,31 @@ extension PanelViewController: WKNavigationDelegate {
         checkAutoLayout(of: webView, site: site)
         checkAutoDarkMode(of: webView, site: site)
 
+        // Links without sizes count as small, except touch icons, which are usually 180px.
+        // Manifest icons only meant for masking or monochrome use rank below the rest.
         let script = """
-        [...document.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]')]
+        const sizeOf = sizes => Math.max(0, ...String(sizes || '').split(/\\s+/).map(s => parseInt(s) || 0));
+        const icons = [...document.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]')]
           .map(l => {
-            const size = Math.max(0, ...(l.sizes ? [...l.sizes].map(s => parseInt(s) || 0) : [0]));
-            const touch = l.rel.includes('apple-touch-icon') ? 1 : 0;
-            return { href: l.href, score: touch * 1000 + size };
-          })
-          .sort((a, b) => b.score - a.score)
-          .map(i => i.href)
+            const touch = l.rel.includes('apple-touch-icon');
+            return { href: l.href, score: sizeOf(l.getAttribute('sizes')) || (touch ? 180 : 0) };
+          });
+        const manifest = document.querySelector('link[rel="manifest"]');
+        if (manifest) {
+          try {
+            const response = await fetch(manifest.href, { credentials: 'include', signal: AbortSignal.timeout(5000) });
+            const text = await response.text();
+            for (const icon of JSON.parse(text.slice(text.indexOf('{'))).icons || []) {
+              if (!icon.src || /svg/.test(icon.type || icon.src)) continue;
+              const general = (icon.purpose || 'any').split(/\\s+/).includes('any');
+              icons.push({ href: new URL(icon.src, response.url).href, score: sizeOf(icon.sizes) / (general ? 1 : 4) });
+            }
+          } catch {}
+        }
+        return [...new Set(icons.sort((a, b) => b.score - a.score).map(i => i.href))];
         """
-        webView.evaluateJavaScript(script) { result, _ in
-            let urls = (result as? [String] ?? []).compactMap(URL.init(string:))
+        webView.callAsyncJavaScript(script, arguments: [:], in: nil, in: .defaultClient) { result in
+            let urls = ((try? result.get()) as? [String] ?? []).compactMap(URL.init(string:))
             FaviconStore.shared.offer(urls, for: site)
         }
     }

@@ -61,11 +61,11 @@ final class FaviconStore: ObservableObject {
     }
 
     /// Icons the site's loaded page declared, best first. For a site at a host's root, only used
-    /// to replace a missing or tiny icon.
+    /// to replace a missing icon, or one too small to fill a start page tile sharply.
     func offer(_ urls: [URL], for site: Site) {
         guard let key = Self.key(for: site.url) else { return }
         let replace = key.contains("/") && !declared.contains(key)
-        if !replace, let current = icons[key], Self.pixelWidth(current) >= 64 { return }
+        if !replace, let current = icons[key], Self.pixelWidth(current) >= 128 { return }
         fetchFirst(urls, key: key, replace: replace)
     }
 
@@ -118,6 +118,8 @@ final class FaviconStore: ObservableObject {
         var clearFraction: Double
         var opaqueFraction: Double
         var meanLuminance: CGFloat
+        /// Share of the opaque pixels that are strongly colored.
+        var colorfulFraction: Double
         /// Average of the saturated pixels; nil for a monochrome icon.
         var accent: NSColor?
     }
@@ -163,6 +165,7 @@ final class FaviconStore: ObservableObject {
         return Coverage(clearFraction: Double(clear) / total,
                         opaqueFraction: Double(opaque) / total,
                         meanLuminance: opaque > 0 ? luminance / CGFloat(opaque) : 0,
+                        colorfulFraction: opaque > 0 ? Double(saturated) / Double(opaque) : 0,
                         accent: accent)
     }
 
@@ -172,10 +175,11 @@ final class FaviconStore: ObservableObject {
     }
 
     /// nil for a full-bleed or rounded app icon; for a glyph floating on transparency,
-    /// whether the glyph itself is light.
+    /// whether the glyph itself is light. A mostly colorful glyph (Google's, say) counts as dark,
+    /// so it sits on white the way its brand shows it.
     private static func bareGlyphLightness(_ image: NSImage) -> Bool? {
         guard let coverage = coverage(of: image), coverage.clearFraction > 0.3 else { return nil }
-        return coverage.meanLuminance > 0.5
+        return coverage.colorfulFraction < 0.25 && coverage.meanLuminance > 0.5
     }
 
     private static func pixelWidth(_ image: NSImage) -> Int {

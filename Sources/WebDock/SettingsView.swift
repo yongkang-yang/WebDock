@@ -33,7 +33,6 @@ private struct GeneralSettingsView: View {
     @State private var launchesAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
     @State private var panelSize = PanelSize.saved
-    @AppStorage(StartPageView.sortsByUsageKey) private var sortsByUsage = true
 
     var body: some View {
         Form {
@@ -65,10 +64,6 @@ private struct GeneralSettingsView: View {
                 Text("Drag the panel's left, right or bottom edge to resize it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-
-            Section("Start Page") {
-                Toggle("Put the sites you use most first", isOn: $sortsByUsage)
             }
 
             Section("Downloads") {
