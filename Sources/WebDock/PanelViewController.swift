@@ -44,6 +44,8 @@ final class PanelViewController: NSViewController {
     /// Which site each web view, sign-in popups included, belongs to, for its saved logins.
     fileprivate let webViewSites = NSMapTable<WKWebView, NSUUID>.weakToStrongObjects()
     fileprivate var pendingLogin: (login: LoginKeychain.Login, password: String)?
+    /// Web views whose current page has had its layout, dark mode and icons looked at.
+    fileprivate var settledPages: Set<ObjectIdentifier> = []
     /// Pages moved out of the panel into windows of their own.
     private var detachedWindows: [(window: NSWindow, observation: NSKeyValueObservation)] = []
     /// The page whose video is fullscreen, its window, and how to put it back where it was.
@@ -756,6 +758,7 @@ final class PanelViewController: NSViewController {
         if let webView = webViews[id] {
             webView.removeFromSuperview()
             Self.closePage(of: webView)
+            settledPages.remove(ObjectIdentifier(webView))
         }
         forgetWebView(id: id)
     }
@@ -1250,6 +1253,15 @@ extension PanelViewController: WKNavigationDelegate {
     /// A new page loses the old one's fullscreen state.
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         exitFullscreen(webView)
+        // Some pages never finish loading (a request that hangs, such as an ad or a stream), and
+        // their layout, dark mode and icons would never be looked at; after a while, look anyway.
+        let page = ObjectIdentifier(webView)
+        settledPages.remove(page)
+        let url = webView.url
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self, weak webView] in
+            guard let self, let webView, webView.isLoading, webView.url == url else { return }
+            self.pageDidSettle(webView)
+        }
     }
 
     /// `<a download>` links download; links to other apps (mailto:, zoommtg:, …) open those apps.
@@ -1292,7 +1304,13 @@ extension PanelViewController: WKNavigationDelegate {
     /// Hands the icons the page declares, in its links and its web app manifest, to the favicon
     /// store, largest first.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard let id = webViews.first(where: { $0.value === webView })?.key,
+        pageDidSettle(webView)
+    }
+
+    /// Once per page: when it finishes loading, or has been loading for a while.
+    private func pageDidSettle(_ webView: WKWebView) {
+        guard settledPages.insert(ObjectIdentifier(webView)).inserted,
+              let id = webViews.first(where: { $0.value === webView })?.key,
               let site = site(for: id),
               let url = webView.url, Site.isSameSite(url.host, site.url.host),
               FaviconStore.key(for: site.url)?.contains("/") != true
