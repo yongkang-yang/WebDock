@@ -712,8 +712,23 @@ final class PanelViewController: NSViewController {
     }
 
     private func releaseWebView(id: UUID) {
-        webViews[id]?.removeFromSuperview()
+        if let webView = webViews[id] {
+            webView.removeFromSuperview()
+            Self.closePage(of: webView)
+        }
         forgetWebView(id: id)
+    }
+
+    /// AppKit's tooltip manager and Writing Tools' affordance hold on to the last web view that
+    /// used them, which kept its page, and the site's web content process, alive after the
+    /// panel let go. Closing the page ends the process whoever still has the view.
+    static func closePage(of webView: WKWebView) {
+        webView.stopLoading()
+        webView.removeAllToolTips()
+        let close = NSSelectorFromString("_close")
+        if webView.responds(to: close) {
+            webView.perform(close)
+        }
     }
 
     /// Drops the panel's hold on a site's web view, remembering where it was.
@@ -1219,14 +1234,14 @@ extension PanelViewController: NSWindowDelegate {
         guard let window = notification.object as? NSWindow else { return }
         if let index = detachedWindows.firstIndex(where: { $0.window === window }) {
             detachedWindows.remove(at: index)
-            (window.contentView as? WKWebView)?.stopLoading()
+            (window.contentView as? WKWebView).map(Self.closePage)
             window.contentView = nil
             window.delegate = nil
             onDetachedWindowsChanged?(detachedWindows.count)
             return
         }
         guard let index = popupWindows.firstIndex(where: { $0 === window }) else { return }
-        (window.contentView as? WKWebView)?.stopLoading()
+        (window.contentView as? WKWebView).map(Self.closePage)
         window.contentView = nil
         window.delegate = nil
         popupWindows.remove(at: index)
