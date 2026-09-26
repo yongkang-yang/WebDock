@@ -78,6 +78,7 @@ final class PanelViewController: NSViewController {
     var keepsPanelOpen: Bool { selectedID.map(model.pinnedIDs.contains) ?? false }
     private var isPanelVisible = false
     private var storeSubscription: AnyCancellable?
+    private var folderSubscription: AnyCancellable?
     private var releaseTimer: Timer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var appearanceObservation: NSKeyValueObservation?
@@ -173,7 +174,11 @@ final class PanelViewController: NSViewController {
         model.onOpenInBrowser = { [weak self] id in self?.openInBrowser(id: id) }
         model.onOpenInWindow = { [weak self] id in self?.openInWindow(id: id) }
         model.onAddSite = { [weak self] site in self?.addSite(site) }
-        model.onMoveSite = { [weak self] id, target in self?.moveSite(id: id, to: target) }
+        model.onMoveSite = { id, target in SiteStore.shared.move(id, to: target) }
+        model.onMergeSite = { id, target, name in SiteStore.shared.merge(id, into: target, newFolderName: name) }
+        model.onRemoveFromFolder = { id in SiteStore.shared.removeFromFolder(id) }
+        model.onUngroupFolder = { id in SiteStore.shared.ungroup(id) }
+        model.onRenameFolder = { id, name in SiteStore.shared.renameFolder(id, to: name) }
         model.pageForAdding = { [weak self] in self?.pageForAdding() ?? ("", "") }
         model.onShowFind = { [weak self] in self?.showFind(nil) }
         model.onFind = { [weak self] query, backwards, restart in
@@ -220,6 +225,9 @@ final class PanelViewController: NSViewController {
         // @Published emits the current value on subscribe, then every change (before it's stored).
         storeSubscription = SiteStore.shared.$sites.sink { [weak self] sites in
             self?.apply(sites)
+        }
+        folderSubscription = SiteStore.shared.$folders.sink { [weak self] folders in
+            self?.model.folders = folders
         }
 
         releaseTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -1057,14 +1065,6 @@ final class PanelViewController: NSViewController {
         guard let webView = currentWebView, let url = webView.url else { return ("", "") }
         let title = webView.title.map(SiteTitle.brand(fromTitle:)) ?? ""
         return (url.absoluteString, title.isEmpty ? SiteTitle.fromHost(url) : title)
-    }
-
-    private func moveSite(id: UUID, to target: UUID) {
-        var sites = SiteStore.shared.sites
-        guard let from = sites.firstIndex(where: { $0.id == id }),
-              let to = sites.firstIndex(where: { $0.id == target }), from != to else { return }
-        sites.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
-        SiteStore.shared.sites = sites
     }
 
     private func addSite(_ site: Site) {

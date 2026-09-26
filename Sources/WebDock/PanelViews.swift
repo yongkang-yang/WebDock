@@ -33,6 +33,7 @@ final class PanelModel: ObservableObject {
     }()
 
     @Published var sites: [Site] = []
+    @Published var folders: [SiteFolder] = []
     /// Newest first, one per site.
     @Published var recents: [RecentPage] = []
     @Published var selectedID: UUID?
@@ -74,6 +75,12 @@ final class PanelModel: ObservableObject {
     var onAddSite: (Site) -> Void = { _ in }
     /// Moves the first site to where the second one is, as a drag over it does.
     var onMoveSite: (UUID, UUID) -> Void = { _, _ in }
+    /// Files the first site into the second slot: a folder, or a site the two then share one with.
+    /// The last value names a new folder.
+    var onMergeSite: (UUID, UUID, String) -> Void = { _, _, _ in }
+    var onRemoveFromFolder: (UUID) -> Void = { _ in }
+    var onUngroupFolder: (UUID) -> Void = { _ in }
+    var onRenameFolder: (UUID, String) -> Void = { _, _ in }
     /// The page on screen as an address and a suggested name, for "Add Page as Site".
     var pageForAdding: () -> (url: String, name: String) = { ("", "") }
     var onShowFind: () -> Void = {}
@@ -88,6 +95,8 @@ final class PanelModel: ObservableObject {
     enum ZoomChange { case zoomIn, zoomOut, reset }
 
     var selectedSite: Site? { sites.first { $0.id == selectedID } }
+    /// The slots of the start page and the rail, folders taking one each.
+    var items: [DockItem] { DockItem.items(sites: sites, folders: folders) }
     var isHomeSelected: Bool { selectedID == Self.homeID }
 }
 
@@ -132,45 +141,91 @@ struct RailView: View {
                     Image(systemName: "house.fill")
                         .font(.system(size: 15, weight: .medium))
                 }
-                ForEach(Array(model.sites.enumerated()), id: \.element.id) { index, site in
-                    RailButton(
-                        site: site,
-                        icon: favicons.icon(for: site),
-                        plateColor: favicons.plateColor(for: site),
-                        shortcut: index < 9 ? index + 1 : nil,
-                        isSelected: site.id == model.selectedID,
-                        isLive: model.liveIDs.contains(site.id),
-                        badge: model.badges[site.id]
-                    ) {
-                        model.onSelect(site.id)
+                ForEach(model.items) { item in
+                    switch item {
+                    case .site(let site):
+                        siteButton(site)
+                    case .folder(let folder, let sites):
+                        folderButton(folder, sites: sites)
                     }
-                    .contextMenu {
-                        Button("Open in Browser") { model.onOpenInBrowser(site.id) }
-                        Button("Open in Window") { model.onOpenInWindow(site.id) }
-                        Button(model.pinnedIDs.contains(site.id) ? "Unpin Page" : "Pin Page") {
-                            model.onTogglePin(site.id)
-                        }
-                        .disabled(!model.liveIDs.contains(site.id))
-                        Button("Close Page") { model.onCloseSite(site.id) }
-                            .disabled(!model.liveIDs.contains(site.id))
-                        Divider()
-                        Picker("Layout", selection: Binding(
-                            get: { site.layout },
-                            set: { model.onSetLayout(site.id, $0) }
-                        )) {
-                            ForEach(Site.Layout.allCases, id: \.self) { Text($0.title) }
-                        }
-                        Picker("Dark Mode", selection: Binding(
-                            get: { site.darkMode },
-                            set: { model.onSetDarkMode(site.id, $0) }
-                        )) {
-                            ForEach(Site.DarkMode.allCases, id: \.self) { Text($0.title) }
-                        }
-                    }
-                    .onAppear { favicons.load(for: site) }
                 }
             }
         }
+    }
+
+    private func siteButton(_ site: Site) -> some View {
+        let index = model.sites.firstIndex { $0.id == site.id } ?? 0
+        return RailButton(
+            site: site,
+            icon: favicons.icon(for: site),
+            plateColor: favicons.plateColor(for: site),
+            shortcut: index < 9 ? index + 1 : nil,
+            isSelected: site.id == model.selectedID,
+            isLive: model.liveIDs.contains(site.id),
+            badge: model.badges[site.id]
+        ) {
+            model.onSelect(site.id)
+        }
+        .contextMenu {
+            Button("Open in Browser") { model.onOpenInBrowser(site.id) }
+            Button("Open in Window") { model.onOpenInWindow(site.id) }
+            Button(model.pinnedIDs.contains(site.id) ? "Unpin Page" : "Pin Page") {
+                model.onTogglePin(site.id)
+            }
+            .disabled(!model.liveIDs.contains(site.id))
+            Button("Close Page") { model.onCloseSite(site.id) }
+                .disabled(!model.liveIDs.contains(site.id))
+            Divider()
+            Picker("Layout", selection: Binding(
+                get: { site.layout },
+                set: { model.onSetLayout(site.id, $0) }
+            )) {
+                ForEach(Site.Layout.allCases, id: \.self) { Text($0.title) }
+            }
+            Picker("Dark Mode", selection: Binding(
+                get: { site.darkMode },
+                set: { model.onSetDarkMode(site.id, $0) }
+            )) {
+                ForEach(Site.DarkMode.allCases, id: \.self) { Text($0.title) }
+            }
+        }
+        .onAppear { favicons.load(for: site) }
+    }
+
+    /// A folder is one slot whose click lists its sites in a menu. A menu rather than a popover:
+    /// the floating rail hides once the pointer leaves it, and would take a popover with it.
+    private func folderButton(_ folder: SiteFolder, sites: [Site]) -> some View {
+        let badges = sites.compactMap { model.badges[$0.id] }
+        return RailIconButton(help: folder.name,
+                              isSelected: sites.contains { $0.id == model.selectedID },
+                              isLive: sites.contains { model.liveIDs.contains($0.id) },
+                              badge: badges.isEmpty ? nil : badges.reduce(0, +)) {
+            showFolderMenu(folder, sites: sites)
+        } glyph: {
+            FolderGlyph(sites: sites, size: Metrics.railIcon, spacing: 2, padding: 4)
+        }
+        .contextMenu {
+            Button("Ungroup Folder") { model.onUngroupFolder(folder.id) }
+        }
+        .onAppear { sites.forEach(favicons.load(for:)) }
+    }
+
+    private func showFolderMenu(_ folder: SiteFolder, sites: [Site]) {
+        let menu = NSMenu(title: folder.name)
+        let header = NSMenuItem(title: folder.name, action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for site in sites {
+            let badge = model.badges[site.id].map { " (\($0))" } ?? ""
+            let item = ClosureMenuItem(title: site.name + badge) { [model] in model.onSelect(site.id) }
+            if let icon = favicons.icon(for: site)?.copy() as? NSImage {
+                icon.size = NSSize(width: 16, height: 16)
+                item.image = icon
+            }
+            item.state = site.id == model.selectedID ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     private var settingsButton: some View {
@@ -275,6 +330,54 @@ struct SiteGlyph: View {
                 .font(.system(size: size * 0.75, weight: .semibold, design: .rounded))
         }
     }
+}
+
+/// A folder's face: its first four sites' icons, two by two.
+struct FolderGlyph: View {
+    let sites: [Site]
+    let size: CGFloat
+    let spacing: CGFloat
+    let padding: CGFloat
+    @ObservedObject private var favicons = FaviconStore.shared
+
+    var body: some View {
+        let cell = (size - padding * 2 - spacing) / 2
+        let shown = Array(sites.prefix(4))
+        VStack(spacing: spacing) {
+            ForEach(0..<2) { row in
+                HStack(spacing: spacing) {
+                    ForEach(0..<2) { column in
+                        let index = row * 2 + column
+                        if index < shown.count {
+                            let site = shown[index]
+                            SiteGlyph(site: site, icon: favicons.icon(for: site),
+                                      plateColor: favicons.plateColor(for: site), size: cell,
+                                      cornerRadius: cell / 4, plateInset: 0.15)
+                                .frame(width: cell, height: cell)
+                        } else {
+                            Color.clear.frame(width: cell, height: cell)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// An NSMenuItem that runs a closure, for menus built on the fly.
+final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    @objc private func run() { handler() }
 }
 
 /// The strip above the web page: rail toggle, current site, loading state, navigation buttons.
@@ -546,22 +649,38 @@ struct StartPageView: View {
     @State private var dragLocation: CGPoint = .zero
     @State private var grabOffset: CGSize = .zero
     @State private var tileFrames: [UUID: CGRect] = [:]
+    /// The slot a drop would file the dragged site into, while the pointer rests on its icon.
+    @State private var mergeTargetID: UUID?
+    /// Over the edge of another slot, the dragged one moves there after a short pause, so a
+    /// drag passing by on its way to another icon's center doesn't shuffle the grid.
+    @State private var pendingMove: DispatchWorkItem?
+    @State private var pendingMoveTarget: UUID?
+    @State private var openFolderID: UUID?
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
-        TimelineView(.everyMinute) { context in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 26) {
-                    greeting(at: context.date)
-                    searchField
-                    siteGrid
-                    if !recentPages.isEmpty {
-                        recentList(now: context.date)
+        ZStack {
+            TimelineView(.everyMinute) { context in
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 26) {
+                        greeting(at: context.date)
+                        searchField
+                        siteGrid
+                        if !recentPages.isEmpty {
+                            recentList(now: context.date)
+                        }
                     }
+                    .padding(.horizontal, 28)
+                    .padding(.top, 36)
+                    .padding(.bottom, 28)
                 }
-                .padding(.horizontal, 28)
-                .padding(.top, 36)
-                .padding(.bottom, 28)
+            }
+            if let openFolderID, case .folder(let folder, let sites)? = model.items.first(where: { $0.id == openFolderID }) {
+                OpenFolderView(model: model, folder: folder, sites: sites) {
+                    withAnimation(.easeOut(duration: 0.2)) { self.openFolderID = nil }
+                }
+                .id(openFolderID)
+                .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
         .onAppear {
@@ -639,33 +758,23 @@ struct StartPageView: View {
 
     private var siteGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 10)], spacing: 10) {
-            // The user's own order, the same as the rail's; drag a tile to move it.
-            ForEach(model.sites) { site in
-                tile(label: site.name, isLive: model.liveIDs.contains(site.id)) {
-                    model.onSelect(site.id)
-                } glyph: {
-                    siteTileGlyph(site)
-                } tint: {
-                    favicons.accentColor(for: site).map { Color(nsColor: $0).opacity(0.28) }
-                } corner: {
-                    if let badge = model.badges[site.id] {
-                        BadgeView(count: badge).offset(x: 4, y: -4)
+            // The user's own order, the same as the rail's. Drag a tile to move it, or onto
+            // another tile's icon to put the two in a folder.
+            ForEach(model.items) { item in
+                itemTile(item)
+                    .scaleEffect(draggingID == item.id ? 1.08 : 1)
+                    .offset(dragOffset(for: item.id))
+                    // Measured outside the offset: the tile's place in the grid, not where it's drawn.
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: TileFramesKey.self,
+                                                   value: [item.id: proxy.frame(in: .named(Self.gridSpace))])
+                        }
                     }
-                }
-                .onAppear { favicons.load(for: site) }
-                .scaleEffect(draggingID == site.id ? 1.08 : 1)
-                .offset(dragOffset(for: site.id))
-                // Measured outside the offset: the tile's place in the grid, not where it's drawn.
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: TileFramesKey.self,
-                                               value: [site.id: proxy.frame(in: .named(Self.gridSpace))])
-                    }
-                }
-                .zIndex(draggingID == site.id ? 1 : 0)
-                .gesture(tileDrag(site.id))
+                    .zIndex(draggingID == item.id ? 1 : 0)
+                    .gesture(tileDrag(item))
             }
-            tile(label: StartText.t("Add Site", "添加网站")) {
+            StartTile(label: StartText.t("Add Site", "添加网站")) {
                 isAdding = true
             } glyph: {
                 Image(systemName: "plus")
@@ -691,6 +800,35 @@ struct StartPageView: View {
         .onPreferenceChange(TileFramesKey.self) { tileFrames = $0 }
     }
 
+    @ViewBuilder
+    private func itemTile(_ item: DockItem) -> some View {
+        switch item {
+        case .site(let site):
+            SiteTile(model: model, site: site, isDropTarget: mergeTargetID == site.id) {
+                model.onSelect(site.id)
+            }
+        case .folder(let folder, let sites):
+            let badges = sites.compactMap { model.badges[$0.id] }
+            StartTile(label: folder.name,
+                      isLive: sites.contains { model.liveIDs.contains($0.id) },
+                      isDropTarget: mergeTargetID == folder.id) {
+                withAnimation(.easeOut(duration: 0.2)) { openFolderID = folder.id }
+            } glyph: {
+                FolderGlyph(sites: sites, size: TileMetrics.size, spacing: 5, padding: 9)
+            } tint: {
+                nil
+            } corner: {
+                if !badges.isEmpty {
+                    BadgeView(count: badges.reduce(0, +)).offset(x: 4, y: -4)
+                }
+            }
+            .contextMenu {
+                Button(StartText.t("Ungroup Folder", "解散文件夹")) { model.onUngroupFolder(folder.id) }
+            }
+            .onAppear { sites.forEach(favicons.load(for:)) }
+        }
+    }
+
     private static let gridSpace = "siteGrid"
 
     /// Drawn where the pointer holds it, while the grid moves its slot under it.
@@ -700,11 +838,15 @@ struct StartPageView: View {
                       height: dragLocation.y - grabOffset.height - frame.minY)
     }
 
-    /// Dragging a tile over another moves it into that slot, like icons in the Dock. A plain
+    /// Dragging a tile over another moves it into that slot, like icons in the Dock; resting it
+    /// on another's icon and letting go files the two into a folder, as on a phone. A plain
     /// SwiftUI gesture rather than drag and drop: AppKit looks for drop targets across the
     /// whole window, where the hidden web views stacked over the start page get in the way.
-    private func tileDrag(_ id: UUID) -> some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.gridSpace))
+    private func tileDrag(_ item: DockItem) -> some Gesture {
+        let id = item.id
+        // Folders don't go inside folders.
+        let canMerge = if case .site = item { true } else { false }
+        return DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.gridSpace))
             .onChanged { value in
                 if draggingID != id {
                     guard let frame = tileFrames[id] else { return }
@@ -713,60 +855,59 @@ struct StartPageView: View {
                     withAnimation(.easeOut(duration: 0.15)) { draggingID = id }
                 }
                 dragLocation = value.location
-                if let target = tileFrames.first(where: { $0.key != id && $0.value.contains(value.location) })?.key {
-                    withAnimation(.easeInOut(duration: 0.2)) { model.onMoveSite(id, target) }
+                guard let (target, frame) = tileFrames.first(where: { $0.key != id && $0.value.contains(value.location) })
+                else {
+                    setMergeTarget(nil)
+                    cancelPendingMove()
+                    return
+                }
+                if canMerge, TileMetrics.iconCore(in: frame).contains(value.location) {
+                    cancelPendingMove()
+                    setMergeTarget(target)
+                } else {
+                    setMergeTarget(nil)
+                    scheduleMove(id, to: target)
                 }
             }
             .onEnded { _ in
+                cancelPendingMove()
+                if let target = mergeTargetID {
+                    let makesFolder = model.sites.contains { $0.id == target }
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        model.onMergeSite(id, target, StartText.t("Folder", "文件夹"))
+                    }
+                    // A new folder opens, so it can be named.
+                    if makesFolder, let folderID = model.sites.first(where: { $0.id == id })?.folderID {
+                        withAnimation(.easeOut(duration: 0.2).delay(0.15)) { openFolderID = folderID }
+                    }
+                }
+                mergeTargetID = nil
                 withAnimation(.easeOut(duration: 0.2)) { draggingID = nil }
             }
     }
 
-    /// An icon fills the whole tile, like an app icon; a site without one shows its initial.
-    @ViewBuilder
-    private func siteTileGlyph(_ site: Site) -> some View {
-        if let icon = favicons.icon(for: site) {
-            SiteGlyph(site: site, icon: icon, plateColor: favicons.plateColor(for: site),
-                      size: Self.tileSize, cornerRadius: Self.tileCornerRadius, plateInset: 0.22)
-        } else {
-            SiteGlyph(site: site, icon: nil, plateColor: nil, size: 28)
-        }
+    private func setMergeTarget(_ id: UUID?) {
+        guard mergeTargetID != id else { return }
+        withAnimation(.easeOut(duration: 0.15)) { mergeTargetID = id }
     }
 
-    private static let tileSize: CGFloat = 58
-    private static let tileCornerRadius: CGFloat = 18
-
-    /// A running site gets a dock-style dot under its name, like its rail slot; on the icon
-    /// itself the dot would vanish into icons of its own color.
-    private func tile<Glyph: View, Corner: View>(label: String,
-                                                 isLive: Bool = false,
-                                                 action: @escaping () -> Void,
-                                                 @ViewBuilder glyph: () -> Glyph,
-                                                 tint: () -> Color?,
-                                                 @ViewBuilder corner: () -> Corner) -> some View {
-        // Not a Button: a button keeps tracking the mouse after the press, so dragging a tile
-        // to rearrange it would never start.
-        VStack(spacing: 7) {
-            glyph()
-                .frame(width: Self.tileSize, height: Self.tileSize)
-                .glassSurface(in: RoundedRectangle(cornerRadius: Self.tileCornerRadius, style: .continuous),
-                              tint: tint(), interactive: true)
-                .overlay(alignment: .topTrailing, content: corner)
-            VStack(spacing: 4) {
-                Text(label)
-                    .font(.system(size: 12))
-                    .lineLimit(1)
-                Circle()
-                    .fill(isLive ? Color.primary.opacity(0.55) : .clear)
-                    .frame(width: 4, height: 4)
-            }
+    private func scheduleMove(_ id: UUID, to target: UUID) {
+        guard pendingMoveTarget != target else { return }
+        cancelPendingMove()
+        let work = DispatchWorkItem { [model] in
+            pendingMove = nil
+            pendingMoveTarget = nil
+            withAnimation(.easeInOut(duration: 0.2)) { model.onMoveSite(id, target) }
         }
-        .frame(maxWidth: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: action)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction(.default, action)
+        pendingMove = work
+        pendingMoveTarget = target
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    private func cancelPendingMove() {
+        pendingMove?.cancel()
+        pendingMove = nil
+        pendingMoveTarget = nil
     }
 
     // MARK: Recents
@@ -833,5 +974,234 @@ private struct TileFramesKey: PreferenceKey {
 
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
         value.merge(nextValue()) { $1 }
+    }
+}
+
+/// A start page tile for one site.
+private struct SiteTile: View {
+    @ObservedObject var model: PanelModel
+    let site: Site
+    var isDropTarget = false
+    let action: () -> Void
+    @ObservedObject private var favicons = FaviconStore.shared
+
+    var body: some View {
+        StartTile(label: site.name, isLive: model.liveIDs.contains(site.id), isDropTarget: isDropTarget,
+                  action: action) {
+            // An icon fills the whole tile, like an app icon; a site without one shows its initial.
+            if let icon = favicons.icon(for: site) {
+                SiteGlyph(site: site, icon: icon, plateColor: favicons.plateColor(for: site),
+                          size: TileMetrics.size, cornerRadius: TileMetrics.cornerRadius, plateInset: 0.22)
+            } else {
+                SiteGlyph(site: site, icon: nil, plateColor: nil, size: 28)
+            }
+        } tint: {
+            favicons.accentColor(for: site).map { Color(nsColor: $0).opacity(0.28) }
+        } corner: {
+            if let badge = model.badges[site.id] {
+                BadgeView(count: badge).offset(x: 4, y: -4)
+            }
+        }
+        .onAppear { favicons.load(for: site) }
+    }
+}
+
+/// An icon with its name under it. A running site gets a dock-style dot under its name, like its
+/// rail slot; on the icon itself the dot would vanish into icons of its own color.
+private enum TileMetrics {
+    static let size: CGFloat = 58
+    static let cornerRadius: CGFloat = 18
+
+    /// The middle of a tile's icon: a drag resting here files into the tile rather than moving.
+    static func iconCore(in frame: CGRect) -> CGRect {
+        CGRect(x: frame.midX - size / 2, y: frame.minY, width: size, height: size).insetBy(dx: 10, dy: 10)
+    }
+}
+
+private struct StartTile<Glyph: View, Corner: View>: View {
+    let label: String
+    var isLive = false
+    /// A dragged site would go into this tile if dropped now.
+    var isDropTarget = false
+    let action: () -> Void
+    @ViewBuilder let glyph: Glyph
+    let tint: () -> Color?
+    @ViewBuilder let corner: Corner
+
+    init(label: String, isLive: Bool = false, isDropTarget: Bool = false, action: @escaping () -> Void,
+         @ViewBuilder glyph: () -> Glyph, tint: @escaping () -> Color?, @ViewBuilder corner: () -> Corner) {
+        self.label = label
+        self.isLive = isLive
+        self.isDropTarget = isDropTarget
+        self.action = action
+        self.glyph = glyph()
+        self.tint = tint
+        self.corner = corner()
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: TileMetrics.cornerRadius, style: .continuous)
+        // Not a Button: a button keeps tracking the mouse after the press, so dragging a tile
+        // to rearrange it would never start.
+        VStack(spacing: 7) {
+            glyph
+                .frame(width: TileMetrics.size, height: TileMetrics.size)
+                .glassSurface(in: shape, tint: tint(), interactive: true)
+                .overlay {
+                    if isDropTarget {
+                        shape.strokeBorder(Color.accentColor, lineWidth: 2.5).padding(-4)
+                    }
+                }
+                .scaleEffect(isDropTarget ? 1.12 : 1)
+                .overlay(alignment: .topTrailing) { corner }
+            VStack(spacing: 4) {
+                Text(label)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                Circle()
+                    .fill(isLive ? Color.primary.opacity(0.55) : .clear)
+                    .frame(width: 4, height: 4)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, action)
+    }
+}
+
+/// An open folder over the start page: its name, which can be edited, and its sites. Drag a site
+/// to reorder it, or out of the folder to take it out; click outside to close.
+private struct OpenFolderView: View {
+    @ObservedObject var model: PanelModel
+    let folder: SiteFolder
+    let sites: [Site]
+    let onClose: () -> Void
+
+    @State private var name = ""
+    @State private var draggingID: UUID?
+    @State private var dragLocation: CGPoint = .zero
+    @State private var grabOffset: CGSize = .zero
+    @State private var tileFrames: [UUID: CGRect] = [:]
+    @State private var cardFrame: CGRect = .zero
+    @FocusState private var isNameFocused: Bool
+
+    private static let space = "openFolder"
+
+    /// Dragged outside the card, a site leaves the folder when it's let go.
+    private var isOutside: Bool {
+        draggingID != nil && !cardFrame.contains(dragLocation)
+    }
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: close)
+
+            VStack(spacing: 16) {
+                TextField(StartText.t("Folder Name", "文件夹名称"), text: $name)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 20, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                    .focused($isNameFocused)
+                    .onSubmit { isNameFocused = false }
+                    .onExitCommand(perform: close)
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(84), spacing: 10), count: 3), spacing: 10) {
+                    ForEach(sites) { site in
+                        SiteTile(model: model, site: site) {
+                            close()
+                            model.onSelect(site.id)
+                        }
+                        .scaleEffect(draggingID == site.id ? 1.08 : 1)
+                        .offset(dragOffset(for: site.id))
+                        .background {
+                            GeometryReader { proxy in
+                                Color.clear.preference(key: TileFramesKey.self,
+                                                       value: [site.id: proxy.frame(in: .named(Self.space))])
+                            }
+                        }
+                        .zIndex(draggingID == site.id ? 1 : 0)
+                        .gesture(tileDrag(site.id))
+                        .contextMenu {
+                            Button(StartText.t("Remove from Folder", "移出文件夹")) {
+                                withAnimation(.easeInOut(duration: 0.2)) { model.onRemoveFromFolder(site.id) }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(22)
+            .frame(width: 84 * 3 + 10 * 2 + 44)
+            .glassSurface(in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+            .opacity(isOutside ? 0.6 : 1)
+            .zIndex(1)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear { cardFrame = proxy.frame(in: .named(Self.space)) }
+                        .onChange(of: proxy.frame(in: .named(Self.space))) { cardFrame = $0 }
+                }
+            }
+        }
+        .coordinateSpace(name: Self.space)
+        .onPreferenceChange(TileFramesKey.self) { tileFrames = $0 }
+        .onAppear {
+            name = folder.name
+            // Typing renames the folder right away, and Esc closes it.
+            isNameFocused = true
+        }
+        .onChange(of: isNameFocused) { focused in
+            if !focused { commitName() }
+        }
+    }
+
+    private func close() {
+        commitName()
+        onClose()
+    }
+
+    private func commitName() {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            name = folder.name
+        } else if trimmed != folder.name {
+            model.onRenameFolder(folder.id, trimmed)
+        }
+    }
+
+    private func dragOffset(for id: UUID) -> CGSize {
+        guard draggingID == id, let frame = tileFrames[id] else { return .zero }
+        return CGSize(width: dragLocation.x - grabOffset.width - frame.minX,
+                      height: dragLocation.y - grabOffset.height - frame.minY)
+    }
+
+    private func tileDrag(_ id: UUID) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.space))
+            .onChanged { value in
+                if draggingID != id {
+                    guard let frame = tileFrames[id] else { return }
+                    grabOffset = CGSize(width: value.startLocation.x - frame.minX,
+                                        height: value.startLocation.y - frame.minY)
+                    withAnimation(.easeOut(duration: 0.15)) { draggingID = id }
+                }
+                dragLocation = value.location
+                if let target = tileFrames.first(where: { $0.key != id && $0.value.contains(value.location) })?.key {
+                    withAnimation(.easeInOut(duration: 0.2)) { model.onMoveSite(id, target) }
+                }
+            }
+            .onEnded { _ in
+                let leaves = isOutside
+                withAnimation(.easeOut(duration: 0.2)) {
+                    draggingID = nil
+                    if leaves {
+                        // The last-but-one site leaving dissolves the folder, and this view goes with it.
+                        model.onRemoveFromFolder(id)
+                    }
+                }
+            }
     }
 }

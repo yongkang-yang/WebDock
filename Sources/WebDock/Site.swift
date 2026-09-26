@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 struct Site: Codable, Identifiable, Equatable {
     /// Desktop: a Mac Safari user agent. Mobile: an iPhone one, so the site serves its phone
@@ -34,6 +35,8 @@ struct Site: Codable, Identifiable, Equatable {
     var url: URL
     var layout: Layout = .auto
     var darkMode: DarkMode = .auto
+    /// The folder the site is filed in on the start page and the rail; nil for a site on its own.
+    var folderID: UUID?
 
     init(name: String, url: URL, layout: Layout = .auto, darkMode: DarkMode = .auto) {
         self.name = name
@@ -50,6 +53,7 @@ struct Site: Codable, Identifiable, Equatable {
         url = try container.decode(URL.self, forKey: .url)
         layout = try container.decodeIfPresent(Layout.self, forKey: .layout) ?? .auto
         darkMode = try container.decodeIfPresent(DarkMode.self, forKey: .darkMode) ?? .auto
+        folderID = try container.decodeIfPresent(UUID.self, forKey: .folderID)
     }
 
     /// Hosts that differ only by a www./m./mobile. prefix belong to the same site.
@@ -80,6 +84,49 @@ struct Site: Codable, Identifiable, Equatable {
     }
 }
 
+/// A named group of sites that takes a single slot, like a folder of apps on a phone.
+struct SiteFolder: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+}
+
+/// One slot on the start page or the rail: a site on its own, or a folder of them.
+enum DockItem: Identifiable {
+    case site(Site)
+    case folder(SiteFolder, [Site])
+
+    var id: UUID {
+        switch self {
+        case .site(let site): site.id
+        case .folder(let folder, _): folder.id
+        }
+    }
+
+    /// Sites stay one flat list, which is also the ⌘1–⌘9 order; a folder sits where its first
+    /// site is, and holds its sites in their list order.
+    static func items(sites: [Site], folders: [SiteFolder]) -> [DockItem] {
+        var items: [DockItem] = []
+        var placed = Set<UUID>()
+        for site in sites {
+            guard let folderID = site.folderID, let folder = folders.first(where: { $0.id == folderID }) else {
+                items.append(.site(site))
+                continue
+            }
+            if placed.insert(folderID).inserted {
+                items.append(.folder(folder, sites.filter { $0.folderID == folderID }))
+            }
+        }
+        return items
+    }
+
+    var sites: [Site] {
+        switch self {
+        case .site(let site): [site]
+        case .folder(_, let sites): sites
+        }
+    }
+}
+
 let defaultSites: [Site] = [
     Site(name: "ChatGPT", url: URL(string: "https://chatgpt.com")!),
     Site(name: "Claude", url: URL(string: "https://claude.ai")!),
@@ -88,17 +135,37 @@ let defaultSites: [Site] = [
     Site(name: "Perplexity", url: URL(string: "https://www.perplexity.ai")!),
 ]
 
-/// The user's site list, persisted in UserDefaults.
+/// The user's site list and folders, persisted in UserDefaults.
 final class SiteStore: ObservableObject {
     static let shared = SiteStore()
 
     private let storageKey = "services"
+    private let foldersKey = "folders"
 
     @Published var sites: [Site] {
-        didSet { save() }
+        didSet {
+            // Deleting or dragging sites elsewhere (Settings) can leave a folder with one site,
+            // or with its sites apart; tidy up, which sets the list once more.
+            let tidied = tidy(sites)
+            if tidied != sites {
+                sites = tidied
+                return
+            }
+            save()
+        }
+    }
+
+    @Published private(set) var folders: [SiteFolder] {
+        didSet { saveFolders() }
     }
 
     private init() {
+        if let data = UserDefaults.standard.data(forKey: foldersKey),
+           let saved = try? JSONDecoder().decode([SiteFolder].self, from: data) {
+            folders = saved
+        } else {
+            folders = []
+        }
         if let data = UserDefaults.standard.data(forKey: storageKey),
            let saved = try? JSONDecoder().decode([Site].self, from: data) {
             sites = saved
@@ -109,11 +176,103 @@ final class SiteStore: ObservableObject {
 
     func resetToDefaults() {
         sites = defaultSites
+        folders = []
+    }
+
+    // MARK: Folders
+
+    /// Moves a slot (a site or a folder) to where another slot is; or, for two sites in the same
+    /// folder, one to where the other is inside it.
+    func move(_ id: UUID, to target: UUID) {
+        let sameFolder = sites.first { $0.id == id }?.folderID
+        if let sameFolder, sites.first(where: { $0.id == target })?.folderID == sameFolder {
+            guard let from = sites.firstIndex(where: { $0.id == id }),
+                  let to = sites.firstIndex(where: { $0.id == target }), from != to else { return }
+            sites.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+            return
+        }
+        var items = DockItem.items(sites: sites, folders: folders)
+        guard let from = items.firstIndex(where: { $0.id == id }),
+              let to = items.firstIndex(where: { $0.id == target }), from != to else { return }
+        items.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        sites = items.flatMap(\.sites)
+    }
+
+    /// Drops a site on another site, making a folder of the two, or on a folder, adding it last.
+    func merge(_ id: UUID, into target: UUID, newFolderName: String) {
+        guard var site = sites.first(where: { $0.id == id }), site.folderID == nil, id != target else { return }
+        var list = sites.filter { $0.id != id }
+        let folderID: UUID
+        if folders.contains(where: { $0.id == target }) {
+            folderID = target
+        } else if let index = list.firstIndex(where: { $0.id == target }), list[index].folderID == nil {
+            let folder = SiteFolder(name: newFolderName)
+            folders.append(folder)
+            folderID = folder.id
+            list[index].folderID = folderID
+        } else {
+            return
+        }
+        site.folderID = folderID
+        let last = list.lastIndex { $0.folderID == folderID } ?? list.count - 1
+        list.insert(site, at: last + 1)
+        sites = list
+    }
+
+    /// Takes a site out of its folder and puts it in the slot after the folder.
+    func removeFromFolder(_ id: UUID) {
+        guard let site = sites.first(where: { $0.id == id }), let folderID = site.folderID else { return }
+        var list = sites.filter { $0.id != id }
+        let last = list.lastIndex { $0.folderID == folderID } ?? list.count - 1
+        var moved = site
+        moved.folderID = nil
+        list.insert(moved, at: last + 1)
+        sites = list
+    }
+
+    /// Puts a folder's sites back on their own, where the folder was.
+    func ungroup(_ folderID: UUID) {
+        sites = sites.map { site in
+            var site = site
+            if site.folderID == folderID { site.folderID = nil }
+            return site
+        }
+    }
+
+    func renameFolder(_ id: UUID, to name: String) {
+        guard let index = folders.firstIndex(where: { $0.id == id }) else { return }
+        folders[index].name = name
+    }
+
+    /// A folder's sites sit together where its first one is; a folder needs two sites, so one
+    /// left alone goes back on its own; folders nothing points to anymore are dropped.
+    private func tidy(_ list: [Site]) -> [Site] {
+        let known = Set(folders.map(\.id))
+        var counts: [UUID: Int] = [:]
+        for site in list {
+            if let id = site.folderID, known.contains(id) { counts[id, default: 0] += 1 }
+        }
+        let tidied = list.map { site in
+            var site = site
+            if let id = site.folderID, (counts[id] ?? 0) < 2 { site.folderID = nil }
+            return site
+        }
+        let used = Set(tidied.compactMap(\.folderID))
+        if folders.contains(where: { !used.contains($0.id) }) {
+            folders.removeAll { !used.contains($0.id) }
+        }
+        return DockItem.items(sites: tidied, folders: folders).flatMap(\.sites)
     }
 
     private func save() {
         if let data = try? JSONEncoder().encode(sites) {
             UserDefaults.standard.set(data, forKey: storageKey)
+        }
+    }
+
+    private func saveFolders() {
+        if let data = try? JSONEncoder().encode(folders) {
+            UserDefaults.standard.set(data, forKey: foldersKey)
         }
     }
 }

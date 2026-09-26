@@ -122,7 +122,7 @@ private struct SitesSettingsView: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(site.name)
                                     .lineLimit(1)
-                                Text(Self.shortAddress(site.url))
+                                Text(folderPrefix(site) + Self.shortAddress(site.url))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -209,6 +209,12 @@ private struct SitesSettingsView: View {
         }
         .buttonStyle(.borderless)
         .help(help)
+    }
+
+    /// Sites in a folder show its name before their address.
+    private func folderPrefix(_ site: Site) -> String {
+        guard let name = store.folders.first(where: { $0.id == site.folderID })?.name else { return "" }
+        return name + " · "
     }
 
     /// "chatgpt.com", or "www.google.com/finance" for a site under a path.
