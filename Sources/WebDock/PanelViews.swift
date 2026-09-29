@@ -134,7 +134,7 @@ struct RailView: View {
     private var siteButtons: some View {
         GlassGroup(spacing: 8) {
             VStack(spacing: 8) {
-                RailIconButton(help: "Home (⌘T)",
+                RailIconButton(help: "Home (⇧⌘H)",
                                isSelected: model.isHomeSelected,
                                isLive: model.liveIDs.contains(PanelModel.homeID),
                                badge: nil) {
@@ -433,7 +433,7 @@ struct HeaderView: View {
                             model.onBack()
                         }
                         .disabled(!model.canGoBack)
-                        GlassIconButton(symbol: "house", help: "Home (⌘T)") {
+                        GlassIconButton(symbol: "house", help: "Home (⇧⌘H)") {
                             model.onGoHome()
                         }
                         GlassIconButton(symbol: "arrow.clockwise", help: "Reload (⌘R)") {
@@ -540,7 +540,7 @@ private struct ConfirmCloseButton: View {
             .glassSurface(in: Capsule(), tint: isArmed ? Color.red.opacity(0.85) : nil, interactive: true)
         }
         .buttonStyle(.plain)
-        .help(isArmed ? "Click again to close the page" : "Close Page (click twice)")
+        .help(isArmed ? "Click again to close the page" : "Close Page (⌘W, or click twice)")
         .onHover { inside in
             if !inside, isArmed { disarm() }
         }

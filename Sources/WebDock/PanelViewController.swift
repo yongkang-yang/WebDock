@@ -199,14 +199,7 @@ final class PanelViewController: NSViewController {
         model.onZoom = { [weak self] change in self?.zoom(change) }
         model.onTogglePin = { [weak self] id in self?.togglePin(id: id) }
         model.onBack = { [weak self] in self?.goBack() }
-        model.onGoHome = { [weak self] in
-            guard let self else { return }
-            if self.selectedID == self.homeID {
-                self.newTab(nil)
-            } else {
-                self.select(id: self.homeID)
-            }
-        }
+        model.onGoHome = { [weak self] in self?.goHome(nil) }
         model.onSearch = { [weak self] text in self?.search(text) }
         model.onReload = { [weak self] in self?.reload(nil) }
         model.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
@@ -934,6 +927,30 @@ final class PanelViewController: NSViewController {
         } else if selectedID == homeID {
             closeSite(id: homeID)
         }
+    }
+
+    /// ⇧⌘H and the header's house: back to home, as it was left; from home itself, to the start page.
+    @objc func goHome(_ sender: Any?) {
+        if model.overview != nil {
+            closeOverview(selecting: nil)
+        }
+        if selectedID == homeID {
+            newTab(nil)
+        } else {
+            select(id: homeID)
+        }
+    }
+
+    /// ⌘W: closes the page on screen, as its close button does, or leaves the overview.
+    /// False when there's no page to close (the start page), so the panel closes instead.
+    func closeCurrentPage() -> Bool {
+        if model.overview != nil {
+            closeOverview(selecting: selectedID.flatMap { webViews[$0] != nil ? $0 : nil })
+            return true
+        }
+        guard let id = selectedID, webViews[id] != nil else { return false }
+        closeSite(id: id)
+        return true
     }
 
     /// ⌘T: a fresh start page, like a new tab.

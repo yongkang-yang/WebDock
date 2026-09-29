@@ -52,9 +52,16 @@ final class GlassPanel: NSPanel {
         onDismiss?()
     }
 
-    /// Cmd+W; a borderless window has no close button to perform.
+    /// Cmd+W, which a borderless window has no close button to perform; nil dismisses the panel.
+    var onClose: (() -> Void)?
+
     override func performClose(_ sender: Any?) {
-        onDismiss?()
+        (onClose ?? onDismiss)?()
+    }
+
+    /// NSWindow only enables Close for windows with a close button, which this one hasn't.
+    override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(performClose(_:)) ? true : super.validateMenuItem(menuItem)
     }
 }
 

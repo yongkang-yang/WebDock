@@ -32,6 +32,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         panel = GlassPanel(contentViewController: panelController)
         panel.onDismiss = { [weak self] in self?.closePanel() }
+        // ⌘W closes the page on screen, like a tab; with no page left, the panel.
+        panel.onClose = { [weak self] in
+            guard let self else { return }
+            if !self.panelController.closeCurrentPage() {
+                self.closePanel()
+            }
+        }
 
         HotKeyCenter.shared.onPress = { [weak self] in self?.togglePanel() }
         HotKeyCenter.shared.start()
@@ -137,7 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings(_:)), keyEquivalent: ",").target = self
-        appMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        appMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         appMenu.addItem(withTitle: "Quit WebDock", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
@@ -157,6 +164,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let viewItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Reload", action: #selector(PanelViewController.reload(_:)), keyEquivalent: "r")
+        // ⇧⌘H, as in Safari.
+        viewMenu.addItem(withTitle: "Home", action: #selector(PanelViewController.goHome(_:)), keyEquivalent: "H")
         viewMenu.addItem(withTitle: "New Tab", action: #selector(PanelViewController.newTab(_:)), keyEquivalent: "t")
         viewMenu.addItem(withTitle: "Show All Pages", action: #selector(PanelViewController.toggleOverview(_:)), keyEquivalent: "\\")
             .keyEquivalentModifierMask = [.command, .shift]
