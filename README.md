@@ -6,7 +6,8 @@ A macOS menu bar app that keeps your favorite web apps — ChatGPT, Claude, Gemi
 
 - **Menu bar panel** — click the globe icon for a rounded Liquid Glass panel that drops down from the menu bar.
 - **Start page** — clock, greeting, a Google search box (or type a URL), your sites as tiles (drag to rearrange), and a "Jump back in" list of recent pages.
-- **Sidebar** — site icons beside the page; the button at the top left shows or hides it. `⌘1`–`⌘9` switch sites, `⌘T` opens a fresh start page.
+- **Sidebar** — site icons beside the page; the button at the top left shows or hides it. `⌘1`–`⌘9` switch sites, `⇧⌘H` goes home, `⌘T` opens a fresh start page.
+- **All pages** — `⇧⌘\`, the button at the header's far right, or a trackpad pinch in shows the open pages as cards, like the iPhone's app switcher. Scroll or swipe through them, click one (or pinch out) to open it, drag one up to close its page; `Esc` goes back.
 - **Stays logged in** — each site keeps its cookies; Google sign-in works in the embedded browser.
 - **Memory-friendly** — sites load only when opened; pages off screen for 3 minutes are released and resume where you left off.
 - **Adapts to the page** — the glass takes on the page's color, and the chrome goes light or dark with it.
@@ -42,7 +43,7 @@ For UI work, `open build/WebDock.app --args --show-panel` opens the panel on lau
 - Left-click the menu bar icon to open or close the panel; right-click for Settings and Quit.
 - Add, edit, reorder, and remove sites in Settings (`⌘,`).
 - Right-click a sidebar icon to open the site in your browser or its own window, close its page, or change its layout and dark mode.
-- The ✕ at the header's right closes the page on screen; it asks for a second click so a stray one doesn't.
+- `⌘W`, or the ✕ at the header's right, closes the page on screen; the ✕ asks for a second click so a stray one doesn't. On the start page, `⌘W` closes the panel.
 - Settings (`⌘,`) has an Open at Login switch, the global shortcut, and whether the start page puts your most used sites first.
 
 ## License
