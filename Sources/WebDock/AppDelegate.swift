@@ -158,6 +158,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Reload", action: #selector(PanelViewController.reload(_:)), keyEquivalent: "r")
         viewMenu.addItem(withTitle: "New Tab", action: #selector(PanelViewController.newTab(_:)), keyEquivalent: "t")
+        viewMenu.addItem(withTitle: "Show All Pages", action: #selector(PanelViewController.toggleOverview(_:)), keyEquivalent: "\\")
+            .keyEquivalentModifierMask = [.command, .shift]
         viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Find…", action: #selector(PanelViewController.showFind(_:)), keyEquivalent: "f")
         viewMenu.addItem(withTitle: "Find Next", action: #selector(PanelViewController.findNext(_:)), keyEquivalent: "g")

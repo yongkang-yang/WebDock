@@ -64,6 +64,8 @@ final class PanelModel: ObservableObject {
     @Published var findQuery = ""
     @Published var findNotFound = false
     @Published var findFocusRequest = 0
+    /// The overview of recent pages, while it's showing.
+    @Published var overview: OverviewSession?
 
     var onSelect: (UUID) -> Void = { _ in }
     var onCloseSite: (UUID) -> Void = { _ in }
@@ -96,6 +98,10 @@ final class PanelModel: ObservableObject {
     /// Query, backwards, and whether to start over from the top (the query changed).
     var onFind: (String, Bool, Bool) -> Void = { _, _, _ in }
     var onCloseFind: () -> Void = {}
+    var onToggleOverview: () -> Void = {}
+    /// The overview is done; the page picked in it, if any, goes on screen.
+    var onCloseOverview: (UUID?) -> Void = { _ in }
+    var onCloseOverviewPage: (UUID) -> Void = { _ in }
     var onZoom: (ZoomChange) -> Void = { _ in }
     /// Bumped to move keyboard focus into the start page's search field.
     @Published var searchFocusRequest = 0
@@ -452,6 +458,10 @@ struct HeaderView: View {
                         .id(id)
                 }
             }
+            GlassIconButton(symbol: "square.on.square", help: "All Pages (⇧⌘\\)") {
+                model.onToggleOverview()
+            }
+            .padding(.leading, hasPage ? 6 : 0)
         }
         .frame(height: Metrics.headerHeight)
     }

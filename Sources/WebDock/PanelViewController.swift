@@ -88,6 +88,12 @@ final class PanelViewController: NSViewController {
     private var releaseTimer: Timer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var appearanceObservation: NSKeyValueObservation?
+    private var pinchMonitor: Any?
+    private var overviewHost: OverviewHostingView!
+    /// Pages in the order they were last on screen, oldest first, for the overview.
+    private var pageOrder: [UUID] = []
+    /// The last picture of each open page, taken as it goes off screen, for the overview.
+    private var snapshots: [UUID: NSImage] = [:]
 
     override func loadView() {
         let (root, content) = makeGlassBackground(size: PanelSize.saved)
@@ -121,7 +127,12 @@ final class PanelViewController: NSViewController {
         startPage.autoresizingMask = [.width, .height]
         webCard.addSubview(startPage)
 
-        for subview in [header, webCard, findBar, toast, loginPrompt, rail] as [NSView] {
+        overviewHost = OverviewHostingView(rootView: OverviewView(model: model))
+        overviewHost.sizingOptions = []
+        overviewHost.isHidden = true
+
+        // Order matters: the overview goes over everything.
+        for subview in [header, webCard, findBar, toast, loginPrompt, rail, overviewHost] as [NSView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(subview)
         }
@@ -146,6 +157,11 @@ final class PanelViewController: NSViewController {
             toast.centerXAnchor.constraint(equalTo: webCard.centerXAnchor),
             toast.bottomAnchor.constraint(equalTo: webCard.bottomAnchor, constant: -14),
             toast.widthAnchor.constraint(lessThanOrEqualTo: webCard.widthAnchor, constant: -24),
+
+            overviewHost.topAnchor.constraint(equalTo: webCard.topAnchor),
+            overviewHost.bottomAnchor.constraint(equalTo: webCard.bottomAnchor),
+            overviewHost.leadingAnchor.constraint(equalTo: webCard.leadingAnchor),
+            overviewHost.trailingAnchor.constraint(equalTo: webCard.trailingAnchor),
         ])
 
         shownRailConstraints = [
@@ -177,6 +193,9 @@ final class PanelViewController: NSViewController {
             self?.find(query, backwards: backwards, restart: restart)
         }
         model.onCloseFind = { [weak self] in self?.closeFind() }
+        model.onToggleOverview = { [weak self] in self?.toggleOverview(nil) }
+        model.onCloseOverview = { [weak self] id in self?.closeOverview(selecting: id) }
+        model.onCloseOverviewPage = { [weak self] id in self?.closeOverviewPage(id) }
         model.onZoom = { [weak self] change in self?.zoom(change) }
         model.onTogglePin = { [weak self] id in self?.togglePin(id: id) }
         model.onBack = { [weak self] in self?.goBack() }
@@ -233,6 +252,20 @@ final class PanelViewController: NSViewController {
         }
         source.resume()
         memoryPressureSource = source
+
+        // A trackpad pinch in shows the overview, as it shows all tabs in Safari. The pinch still
+        // reaches the page, since maps and the like zoom with it.
+        var pinch: CGFloat = 0
+        pinchMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
+            guard let self, event.window === self.view.window, self.model.overview == nil else { return event }
+            if event.phase == .began { pinch = 0 }
+            pinch += event.magnification
+            if pinch < -0.2 {
+                pinch = .infinity  // once per pinch
+                self.toggleOverview(nil)
+            }
+            return event
+        }
     }
 
     // MARK: - Panel visibility
@@ -247,6 +280,9 @@ final class PanelViewController: NSViewController {
 
     func panelDidHide() {
         isPanelVisible = false
+        if model.overview != nil {
+            closeOverview(selecting: nil)
+        }
         if let id = selectedID, webViews[id] != nil {
             hiddenSince[id] = Date()
         }
@@ -302,6 +338,8 @@ final class PanelViewController: NSViewController {
             }
         }
         let validKeys = Set(newSites.map(\.id.uuidString) + [homeID.uuidString])
+        pageOrder.removeAll { !validKeys.contains($0.uuidString) }
+        snapshots = snapshots.filter { validKeys.contains($0.key.uuidString) }
         lastURLs = lastURLs.filter { validKeys.contains($0.key) }
         resolvedLayouts = resolvedLayouts.filter { validKeys.contains($0.key) }
         resolvedDarkModes = resolvedDarkModes.filter { validKeys.contains($0.key) }
@@ -325,6 +363,7 @@ final class PanelViewController: NSViewController {
     private func select(id: UUID?) {
         if let previous = selectedID, previous != id, webViews[previous] != nil {
             hiddenSince[previous] = Date()
+            takeSnapshot(of: previous)
         }
         if id != selectedID, model.isFindVisible {
             closeFind(refocus: false)
@@ -350,6 +389,8 @@ final class PanelViewController: NSViewController {
             other.isHidden = otherID != id
         }
         webView.isHidden = false
+        pageOrder.removeAll { $0 == id }
+        pageOrder.append(id)
         syncNavigationState()
         focusCurrentWebView()
     }
@@ -681,6 +722,10 @@ final class PanelViewController: NSViewController {
     }
 
     private func releaseWebView(id: UUID) {
+        if id == homeID {  // home's search page is gone for good; a site reopens where it was
+            pageOrder.removeAll { $0 == homeID }
+            snapshots[homeID] = nil
+        }
         if let webView = webViews[id] {
             webView.removeFromSuperview()
             Self.closePage(of: webView)
@@ -712,6 +757,7 @@ final class PanelViewController: NSViewController {
         }
         webViewObservations[id] = nil
         webViews[id] = nil
+        snapshots[id] = nil
         model.badges[id] = nil
         loadedURLs[id] = nil
         loadedMobile[id] = nil
@@ -753,6 +799,91 @@ final class PanelViewController: NSViewController {
         } else if selectedID == homeID {
             view.window?.makeFirstResponder(startPage)
             model.searchFocusRequest += 1
+        }
+    }
+
+    // MARK: - Overview
+
+    /// ⇧⌘\: every recent page as a card, like the iPhone's app switcher.
+    @objc func toggleOverview(_ sender: Any?) {
+        guard isPanelVisible else { return }
+        if model.overview != nil {
+            closeOverview(selecting: selectedID.flatMap { webViews[$0] != nil ? $0 : nil })
+            return
+        }
+        if model.isFindVisible {
+            closeFind(refocus: false)
+        }
+        // The page on screen shrinks into its card, so it needs a fresh picture first.
+        let current = selectedID.flatMap { webViews[$0] != nil ? $0 : nil }
+        guard let current else {
+            showOverview(currentID: nil)
+            return
+        }
+        takeSnapshot(of: current) { [weak self] in self?.showOverview(currentID: current) }
+    }
+
+    private func showOverview(currentID: UUID?) {
+        guard isPanelVisible, model.overview == nil else { return }
+        // Only pages that are open; a released one has no page left to go back to.
+        let pages = pageOrder.compactMap { id -> OverviewPage? in
+            guard webViews[id] != nil, let site = site(for: id) else { return nil }
+            return OverviewPage(site: site, snapshot: snapshots[id])
+        }
+        model.overview = OverviewSession(pages: pages, currentID: currentID)
+        overviewHost.isHidden = false
+        view.window?.makeFirstResponder(overviewHost)
+        // Pages never pictured yet get one now.
+        for page in pages where page.snapshot == nil {
+            takeSnapshot(of: page.id) { [weak self] in
+                guard let self, let image = self.snapshots[page.id],
+                      let index = self.model.overview?.pages.firstIndex(where: { $0.id == page.id }) else { return }
+                self.model.overview?.pages[index].snapshot = image
+            }
+        }
+    }
+
+    /// The picked card has grown to fill the page's place; the page itself takes over from it.
+    private func closeOverview(selecting id: UUID?) {
+        guard model.overview != nil else { return }
+        if let id, site(for: id) != nil {
+            select(id: id)
+        } else {
+            focusCurrentWebView()
+        }
+        // A frame later, so a page brought back from hiding has drawn before the card goes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            self.model.overview = nil
+            self.overviewHost.isHidden = true
+        }
+    }
+
+    private func closeOverviewPage(_ id: UUID) {
+        model.overview?.pages.removeAll { $0.id == id }
+        pageOrder.removeAll { $0 == id }
+        snapshots[id] = nil
+        if webViews[id] != nil {
+            closeSite(id: id)
+        }
+        if model.overview?.currentID == id {
+            model.overview?.currentID = nil
+        }
+    }
+
+    private func takeSnapshot(of id: UUID, completion: (() -> Void)? = nil) {
+        guard let webView = webViews[id], webView.bounds.width > 0 else {
+            completion?()
+            return
+        }
+        let configuration = WKSnapshotConfiguration()
+        configuration.afterScreenUpdates = false
+        configuration.snapshotWidth = NSNumber(value: Double(min(webView.bounds.width, 720)))
+        webView.takeSnapshot(with: configuration) { [weak self] image, _ in
+            if let image, self?.webViews[id] === webView {
+                self?.snapshots[id] = image
+            }
+            completion?()
         }
     }
 
@@ -1410,6 +1541,16 @@ extension PanelViewController: WKUIDelegate {
 /// NSHostingView hit-tests its SwiftUI content even while hidden, so a hidden view over the page
 /// went on swallowing clicks meant for it. The find bar and toasts float over the page.
 final class PassThroughHostingView<Content: View>: NSHostingView<Content> {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isHidden ? nil : super.hitTest(point)
+    }
+}
+
+/// The overview takes the click that brings the panel forward, like the iPhone's switcher
+/// takes the first tap, instead of the click only making the panel key.
+final class OverviewHostingView: NSHostingView<OverviewView> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         isHidden ? nil : super.hitTest(point)
     }
