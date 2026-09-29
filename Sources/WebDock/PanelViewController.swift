@@ -63,15 +63,12 @@ final class PanelViewController: NSViewController {
     private var startPage: NSHostingView<StartPageView>!
     private let homeID = PanelModel.homeID
     private let recentsKey = "recentPages"
-    private let railPinnedKey = "railPinned"
+    /// Whether the rail shows; the key is from when it could also float over the page.
+    private let railShownKey = "railPinned"
     private var rail: PassThroughHostingView<RailView>!
     private var findBar: PassThroughHostingView<FindBarView>!
-    private let railHotZone = HoverZoneView()
-    private var pinnedRailConstraints: [NSLayoutConstraint] = []
-    private var floatingRailConstraints: [NSLayoutConstraint] = []
-    private var isRailHovered = false
-    private var isHotZoneHovered = false
-    private var hideRailWork: DispatchWorkItem?
+    private var shownRailConstraints: [NSLayoutConstraint] = []
+    private var hiddenRailConstraints: [NSLayoutConstraint] = []
     private var sites: [Site] = []
     private var webViews: [UUID: WKWebView] = [:]
     private var webViewObservations: [UUID: [NSKeyValueObservation]] = [:]
@@ -124,10 +121,7 @@ final class PanelViewController: NSViewController {
         startPage.autoresizingMask = [.width, .height]
         webCard.addSubview(startPage)
 
-        railHotZone.onHoverChange = { [weak self] inside in self?.railHoverChanged(inside, fromHotZone: true) }
-
-        // Order matters: the floating rail sits over the page, the hot zone over everything.
-        for subview in [header, webCard, findBar, toast, loginPrompt, rail, railHotZone] as [NSView] {
+        for subview in [header, webCard, findBar, toast, loginPrompt, rail] as [NSView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(subview)
         }
@@ -143,12 +137,6 @@ final class PanelViewController: NSViewController {
             webCard.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -padding),
             webCard.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -padding),
 
-            // The panel's left margin plus a sliver of the page; it never takes clicks.
-            railHotZone.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            railHotZone.widthAnchor.constraint(equalToConstant: padding + 6),
-            railHotZone.topAnchor.constraint(equalTo: webCard.topAnchor),
-            railHotZone.bottomAnchor.constraint(equalTo: webCard.bottomAnchor),
-
             findBar.topAnchor.constraint(equalTo: webCard.topAnchor, constant: 10),
             findBar.trailingAnchor.constraint(equalTo: webCard.trailingAnchor, constant: -10),
 
@@ -160,30 +148,20 @@ final class PanelViewController: NSViewController {
             toast.widthAnchor.constraint(lessThanOrEqualTo: webCard.widthAnchor, constant: -24),
         ])
 
-        pinnedRailConstraints = [
+        shownRailConstraints = [
             rail.topAnchor.constraint(equalTo: webCard.topAnchor),
             rail.bottomAnchor.constraint(equalTo: webCard.bottomAnchor),
             rail.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: padding - 6),
             rail.widthAnchor.constraint(equalToConstant: Metrics.railWidth),
             webCard.leadingAnchor.constraint(equalTo: rail.trailingAnchor, constant: Metrics.gap - 4),
         ]
-        floatingRailConstraints = [
-            rail.topAnchor.constraint(equalTo: webCard.topAnchor, constant: 8),
-            rail.bottomAnchor.constraint(lessThanOrEqualTo: webCard.bottomAnchor, constant: -8),
-            rail.leadingAnchor.constraint(equalTo: webCard.leadingAnchor, constant: 6),
+        hiddenRailConstraints = [
             webCard.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: padding),
         ]
-        model.isRailPinned = UserDefaults.standard.bool(forKey: railPinnedKey)
+        model.isRailShown = UserDefaults.standard.bool(forKey: railShownKey)
         applyRailMode()
 
-        model.onSelect = { [weak self] id in
-            self?.select(id: id)
-            if self?.model.isRailPinned == false {
-                self?.hideRailWork?.cancel()
-                self?.isRailHovered = false
-                self?.setFloatingRailShown(false, animated: true)
-            }
-        }
+        model.onSelect = { [weak self] id in self?.select(id: id) }
         model.onCloseSite = { [weak self] id in self?.closeSite(id: id) }
         model.onOpenInBrowser = { [weak self] id in self?.openInBrowser(id: id) }
         model.onOpenInWindow = { [weak self] id in self?.openInWindow(id: id) }
@@ -213,7 +191,7 @@ final class PanelViewController: NSViewController {
         model.onSearch = { [weak self] text in self?.search(text) }
         model.onReload = { [weak self] in self?.reload(nil) }
         model.onOpenSettings = { [weak self] in self?.onOpenSettings?() }
-        model.onToggleRailPin = { [weak self] in self?.toggleRailPin() }
+        model.onToggleRail = { [weak self] in self?.toggleRail() }
         model.onSetLayout = { id, layout in
             guard let index = SiteStore.shared.sites.firstIndex(where: { $0.id == id }) else { return }
             SiteStore.shared.sites[index].layout = layout
@@ -224,7 +202,6 @@ final class PanelViewController: NSViewController {
             guard let index = SiteStore.shared.sites.firstIndex(where: { $0.id == id }) else { return }
             SiteStore.shared.sites[index].darkMode = mode
         }
-        model.onRailHover = { [weak self] inside in self?.railHoverChanged(inside, fromHotZone: false) }
         model.onAnswerLoginPrompt = { [weak self] save in self?.answerLoginPrompt(save: save) }
         PasswordGate.startObserving()
         pageZooms = UserDefaults.standard.dictionary(forKey: pageZoomsKey) as? [String: Double] ?? [:]
@@ -270,9 +247,6 @@ final class PanelViewController: NSViewController {
 
     func panelDidHide() {
         isPanelVisible = false
-        if !model.isRailPinned {
-            setFloatingRailShown(false, animated: false)
-        }
         if let id = selectedID, webViews[id] != nil {
             hiddenSince[id] = Date()
         }
@@ -281,9 +255,9 @@ final class PanelViewController: NSViewController {
 
     // MARK: - Rail
 
-    private func toggleRailPin() {
-        model.isRailPinned.toggle()
-        UserDefaults.standard.set(model.isRailPinned, forKey: railPinnedKey)
+    private func toggleRail() {
+        model.isRailShown.toggle()
+        UserDefaults.standard.set(model.isRailShown, forKey: railShownKey)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.2
             context.allowsImplicitAnimation = true
@@ -293,62 +267,14 @@ final class PanelViewController: NSViewController {
     }
 
     private func applyRailMode() {
-        hideRailWork?.cancel()
-        isRailHovered = false
-        isHotZoneHovered = false
-        if model.isRailPinned {
-            NSLayoutConstraint.deactivate(floatingRailConstraints)
-            NSLayoutConstraint.activate(pinnedRailConstraints)
-            rail.sizingOptions = []
-            railHotZone.isEnabled = false
-            rail.isHidden = false
-            rail.alphaValue = 1
+        if model.isRailShown {
+            NSLayoutConstraint.deactivate(hiddenRailConstraints)
+            NSLayoutConstraint.activate(shownRailConstraints)
         } else {
-            NSLayoutConstraint.deactivate(pinnedRailConstraints)
-            NSLayoutConstraint.activate(floatingRailConstraints)
-            rail.sizingOptions = [.intrinsicContentSize]
-            railHotZone.isEnabled = true
-            setFloatingRailShown(false, animated: false)
+            NSLayoutConstraint.deactivate(shownRailConstraints)
+            NSLayoutConstraint.activate(hiddenRailConstraints)
         }
-    }
-
-    /// Hovering the left edge or the rail itself keeps the floating rail out; leaving both hides it.
-    private func railHoverChanged(_ inside: Bool, fromHotZone: Bool) {
-        guard !model.isRailPinned else { return }
-        if fromHotZone {
-            isHotZoneHovered = inside
-        } else {
-            isRailHovered = inside
-        }
-        hideRailWork?.cancel()
-        if isRailHovered || isHotZoneHovered {
-            setFloatingRailShown(true, animated: true)
-        } else {
-            let work = DispatchWorkItem { [weak self] in
-                guard let self, !self.isRailHovered, !self.isHotZoneHovered else { return }
-                self.setFloatingRailShown(false, animated: true)
-            }
-            hideRailWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
-        }
-    }
-
-    private func setFloatingRailShown(_ shown: Bool, animated: Bool) {
-        if shown {
-            rail.isHidden = false
-        }
-        guard animated else {
-            rail.alphaValue = shown ? 1 : 0
-            rail.isHidden = !shown
-            return
-        }
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.18
-            rail.animator().alphaValue = shown ? 1 : 0
-        }, completionHandler: { [weak self] in
-            guard let self, !shown, self.rail.alphaValue == 0 else { return }
-            self.rail.isHidden = true
-        })
+        rail.isHidden = !model.isRailShown
     }
 
     // MARK: - Sites
@@ -1481,37 +1407,10 @@ extension PanelViewController: WKUIDelegate {
 
 // MARK: - Rail host
 
-/// NSHostingView hit-tests its SwiftUI content even while hidden, so the faded-out floating
-/// rail went on swallowing clicks meant for the page under it (ChatGPT's own sidebar).
-/// The find bar and toasts float over the page the same way.
+/// NSHostingView hit-tests its SwiftUI content even while hidden, so a hidden view over the page
+/// went on swallowing clicks meant for it. The find bar and toasts float over the page.
 final class PassThroughHostingView<Content: View>: NSHostingView<Content> {
     override func hitTest(_ point: NSPoint) -> NSView? {
         isHidden ? nil : super.hitTest(point)
     }
-}
-
-// MARK: - Hover zone
-
-/// An invisible strip that reports the mouse entering and leaving, without ever taking clicks.
-final class HoverZoneView: NSView {
-    var onHoverChange: ((Bool) -> Void)?
-    var isEnabled = true
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: .zero,
-                                       options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                       owner: self))
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        if isEnabled { onHoverChange?(true) }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        if isEnabled { onHoverChange?(false) }
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

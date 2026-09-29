@@ -50,8 +50,8 @@ final class PanelModel: ObservableObject {
     @Published var pinnedIDs: Set<UUID> = []
     @Published var isLoading = false
     @Published var canGoBack = false
-    /// Pinned: the rail sits beside the page. Unpinned: it floats over the page on hover.
-    @Published var isRailPinned = false
+    /// The rail of site icons beside the page.
+    @Published var isRailShown = false
     /// The current page's color, used to tint glass that sits over the page.
     @Published var pageColor: NSColor?
     /// Unread counts that live pages show in their titles, e.g. "Inbox (3)" or "(3) Home / X".
@@ -77,7 +77,7 @@ final class PanelModel: ObservableObject {
     var onGoHome: () -> Void = {}
     var onReload: () -> Void = {}
     var onOpenSettings: () -> Void = {}
-    var onToggleRailPin: () -> Void = {}
+    var onToggleRail: () -> Void = {}
     var onSetLayout: (UUID, Site.Layout) -> Void = { _, _ in }
     var onSetDarkMode: (UUID, Site.DarkMode) -> Void = { _, _ in }
     var onSearch: (String) -> Void = { _ in }
@@ -99,7 +99,6 @@ final class PanelModel: ObservableObject {
     var onZoom: (ZoomChange) -> Void = { _ in }
     /// Bumped to move keyboard focus into the start page's search field.
     @Published var searchFocusRequest = 0
-    var onRailHover: (Bool) -> Void = { _ in }
     /// Whether to save the login in `loginPrompt`.
     var onAnswerLoginPrompt: (Bool) -> Void = { _ in }
 
@@ -111,33 +110,19 @@ final class PanelModel: ObservableObject {
     var isHomeSelected: Bool { selectedID == Self.homeID }
 }
 
-/// The strip of site icons. Docked beside the page when pinned, a floating glass plate otherwise.
+/// The strip of site icons beside the page, when shown.
 struct RailView: View {
     @ObservedObject var model: PanelModel
     @ObservedObject private var favicons = FaviconStore.shared
 
     var body: some View {
-        Group {
-            if model.isRailPinned {
-                VStack(spacing: 0) {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        siteButtons.padding(.vertical, 2)
-                    }
-                    Spacer(minLength: Metrics.gap)
-                    settingsButton
-                }
-            } else {
-                VStack(spacing: 8) {
-                    siteButtons
-                    settingsButton
-                }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 4)
-                .glassSurface(in: RoundedRectangle(cornerRadius: Metrics.cardRadius, style: .continuous),
-                              tint: model.pageColor.map { Color(nsColor: $0).opacity(0.85) })
+        VStack(spacing: 0) {
+            ScrollView(.vertical, showsIndicators: false) {
+                siteButtons.padding(.vertical, 2)
             }
+            Spacer(minLength: Metrics.gap)
+            settingsButton
         }
-        .onHover { model.onRailHover($0) }
     }
 
     private var siteButtons: some View {
@@ -203,8 +188,7 @@ struct RailView: View {
         .onAppear { favicons.load(for: site) }
     }
 
-    /// A folder is one slot whose click lists its sites in a menu. A menu rather than a popover:
-    /// the floating rail hides once the pointer leaves it, and would take a popover with it.
+    /// A folder is one slot whose click lists its sites in a menu.
     private func folderButton(_ folder: SiteFolder, sites: [Site]) -> some View {
         let badges = sites.compactMap { model.badges[$0.id] }
         return RailIconButton(help: folder.name,
@@ -400,8 +384,8 @@ struct HeaderView: View {
     var body: some View {
         HStack(spacing: 8) {
             GlassIconButton(symbol: "sidebar.left",
-                            help: model.isRailPinned ? "Auto-hide Sidebar" : "Pin Sidebar") {
-                model.onToggleRailPin()
+                            help: model.isRailShown ? "Hide Sidebar" : "Show Sidebar") {
+                model.onToggleRail()
             }
             if let site = model.selectedSite {
                 SiteGlyph(site: site, icon: favicons.icon(for: site),
