@@ -261,11 +261,11 @@ private struct SiteEditor: View {
                 }
             }
             Section {
-                Picker("Layout", selection: binding(\.layout)) {
+                Picker("Layout", selection: binding(\.layout, default: .auto)) {
                     ForEach(Site.Layout.allCases, id: \.self) { Text($0.title) }
                 }
                 .pickerStyle(.segmented)
-                Picker("Dark Mode", selection: binding(\.darkMode)) {
+                Picker("Dark Mode", selection: binding(\.darkMode, default: .auto)) {
                     ForEach(Site.DarkMode.allCases, id: \.self) { Text($0.title) }
                 }
                 .pickerStyle(.segmented)
@@ -295,10 +295,11 @@ private struct SiteEditor: View {
         change(&store.sites[index])
     }
 
-    private func binding<Value>(_ keyPath: WritableKeyPath<Site, Value>) -> Binding<Value> {
-        let fallback = site![keyPath: keyPath]
-        return Binding(get: { site?[keyPath: keyPath] ?? fallback },
-                       set: { value in update { $0[keyPath: keyPath] = value } })
+    /// The editor can still redraw for a moment after its site is deleted, so the fallback
+    /// can't come from the site itself.
+    private func binding<Value>(_ keyPath: WritableKeyPath<Site, Value>, default fallback: Value) -> Binding<Value> {
+        Binding(get: { site?[keyPath: keyPath] ?? fallback },
+                set: { value in update { $0[keyPath: keyPath] = value } })
     }
 
     private func commitURL() {
