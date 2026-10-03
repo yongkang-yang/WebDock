@@ -9,7 +9,7 @@ A macOS menu bar app that keeps your favorite web apps — ChatGPT, Claude, Gemi
 - **Sidebar** — site icons beside the page; the button at the top left shows or hides it. `⌘1`–`⌘9` switch sites, `⇧⌘H` goes home, `⌘T` opens a fresh start page.
 - **All pages** — `⇧⌘\`, the button at the header's far right, or a trackpad pinch in shows the open pages as cards, like the iPhone's app switcher. Scroll or swipe through them, click one (or pinch out) to open it, drag one up to close its page; `Esc` goes back.
 - **Stays logged in** — each site keeps its cookies; Google sign-in works in the embedded browser.
-- **Memory-friendly** — sites load only when opened; pages off screen for 3 minutes are released and resume where you left off.
+- **Memory-friendly** — sites load only when opened; pages off screen for 3 minutes are released and resume where you left off. Pin a page (the header's pin) to keep it loaded in the background.
 - **Adapts to the page** — the glass takes on the page's color, and the chrome goes light or dark with it.
 - **Per-site layout** — Auto / Desktop / Mobile. Auto switches desktop-only sites to their mobile version when they don't fit.
 - **Per-site dark mode** — Auto / Force / Off. Auto darkens pages that ignore the system's dark mode, and follows the system live.

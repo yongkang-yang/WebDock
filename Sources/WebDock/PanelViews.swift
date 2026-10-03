@@ -46,7 +46,8 @@ final class PanelModel: ObservableObject {
     @Published var recents: [RecentPage] = []
     @Published var selectedID: UUID?
     @Published var liveIDs: Set<UUID> = []
-    /// Pinned pages are never released, and while one is on screen the panel stays open.
+    /// Pinned pages are never released. The panel closes over them like over any other page;
+    /// a page that should stay on screen goes into a window of its own.
     @Published var pinnedIDs: Set<UUID> = []
     @Published var isLoading = false
     @Published var canGoBack = false
@@ -444,7 +445,7 @@ struct HeaderView: View {
                         }
                         let pinned = model.selectedID.map(model.pinnedIDs.contains) ?? false
                         GlassIconButton(symbol: pinned ? "pin.fill" : "pin",
-                                        help: pinned ? "Unpin Page" : "Pin Page (keeps the panel open and the page loaded)") {
+                                        help: pinned ? "Unpin Page" : "Pin Page (keeps it loaded in the background)") {
                             model.onTogglePin(nil)
                         }
                         moreMenu

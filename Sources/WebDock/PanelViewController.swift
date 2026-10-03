@@ -78,10 +78,8 @@ final class PanelViewController: NSViewController {
     private var lastURLs: [String: String] = [:]
     private var popupWindows: [NSWindow] = []
     private var selectedID: UUID?
-    /// A pinned page is on screen, so clicking elsewhere shouldn't close the panel.
-    var keepsPanelOpen: Bool {
-        PasswordGate.isAuthenticating || (selectedID.map(model.pinnedIDs.contains) ?? false)
-    }
+    /// The Touch ID sheet takes the focus away; that shouldn't close the panel under it.
+    var keepsPanelOpen: Bool { PasswordGate.isAuthenticating }
     private var isPanelVisible = false
     private var storeSubscription: AnyCancellable?
     private var folderSubscription: AnyCancellable?

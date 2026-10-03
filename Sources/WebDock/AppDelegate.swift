@@ -49,10 +49,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Switching to another app (Cmd+Tab, clicking its window, "open in browser") closes the panel,
-    /// unless the page on screen is pinned.
+    /// Switching to another app (Cmd+Tab, clicking its window, "open in browser") closes the panel.
     func applicationDidResignActive(_ notification: Notification) {
-        closePanelUnlessPinned()
+        closePanelUnlessBusy()
     }
 
     /// Clicking the Dock icon (shown while a page has its own window) with nothing on screen.
@@ -97,11 +96,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.invalidateShadow()
 
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.closePanelUnlessPinned()
+            self?.closePanelUnlessBusy()
         }
     }
 
-    private func closePanelUnlessPinned() {
+    private func closePanelUnlessBusy() {
         if !panelController.keepsPanelOpen {
             closePanel()
         }
