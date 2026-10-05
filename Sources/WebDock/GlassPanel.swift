@@ -2,8 +2,8 @@ import AppKit
 
 /// The panel's size, which the user sets by dragging its edges.
 enum PanelSize {
-    static let standard = NSSize(width: 600, height: 720)
-    static let minimum = NSSize(width: 460, height: 480)
+    static let standard = NSSize(width: 440, height: 600)
+    static let minimum = NSSize(width: 380, height: 400)
     private static let storageKey = "panelSize"
 
     static var saved: NSSize {
