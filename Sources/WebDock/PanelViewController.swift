@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import WebKit
+import WebDockPolicies
 
 /// The panel content: a rail of site icons on the left, a header and the active web page on the right.
 ///
@@ -1554,7 +1555,8 @@ extension PanelViewController: WKNavigationDelegate {
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if navigationAction.shouldPerformDownload {
-            decisionHandler(isSpeculative(webView) ? .cancel : .download)
+            decisionHandler(SpeculativePagePolicy.allowsInteractiveSideEffects(
+                isSpeculative: isSpeculative(webView)) ? .download : .cancel)
             return
         }
         let webSchemes: Set<String> = ["http", "https", "about", "blob", "data", "file", "javascript"]
@@ -1668,7 +1670,8 @@ extension PanelViewController: WKUIDelegate {
                  for navigationAction: WKNavigationAction,
                  windowFeatures: WKWindowFeatures) -> WKWebView? {
         // Off-screen speculative navigation must not open a popup or launch the browser.
-        guard !isSpeculative(webView) else { return nil }
+        guard SpeculativePagePolicy.allowsInteractiveSideEffects(isSpeculative: isSpeculative(webView))
+        else { return nil }
         // Plain target=_blank links go to the default browser, except ones that stay on the
         // page's own site or go through Google's account chooser (e.g. switching to another
         // signed-in account), which load in place so the switch happens here.
@@ -1790,7 +1793,11 @@ extension PanelViewController: WKUIDelegate {
         }
         let isSelected = isPanelVisible && selectedID.flatMap { webViews[$0] } === webView
         let isDetached = detachedWindows.contains { $0.window.contentView === webView }
-        guard isSelected || isDetached else {
+        guard SpeculativePagePolicy.allowsMediaRequest(
+            isSpeculative: isSpeculative(webView),
+            isSelectedAndVisible: isSelected,
+            isDetachedWindow: isDetached
+        ) else {
             decisionHandler(.deny)
             return
         }
