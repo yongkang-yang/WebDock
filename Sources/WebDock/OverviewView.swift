@@ -5,6 +5,9 @@ import SwiftUI
 struct OverviewPage: Identifiable {
     let site: Site
     var snapshot: NSImage?
+    /// Resident memory of the page's main WebKit content process (not page-exclusive memory).
+    var memoryBytes: UInt64?
+    var sharedProcess = false
 
     var id: UUID { site.id }
 }
@@ -168,6 +171,7 @@ private struct OverviewCarousel: View {
                 ForEach(Array(pages.enumerated()), id: \.element.id) { index, page in
                     title(page, index: index, layout: layout)
                     card(page, index: index, layout: layout)
+                    processMemory(page, index: index, layout: layout)
                 }
                 if pages.isEmpty {
                     Text("No Recent Pages")
@@ -315,6 +319,29 @@ private struct OverviewCarousel: View {
         .position(x: rect.minX + width / 2, y: rect.minY - 17)
         .opacity(expandedOrHidden(page) ? 0 : opacity(page, index: index))
         .zIndex(Double(index * 2 + 1))
+    }
+
+    /// Put the process reading beneath its page, as on a phone's recent-apps screen.
+    /// One WebKit process can be shared by several pages: this is NOT per-tab usage.
+    private func processMemory(_ page: OverviewPage, index: Int, layout: CarouselLayout) -> some View {
+        let rect = rect(page, index: index, layout: layout)
+        let caption: String = if let bytes = page.memoryBytes {
+            "Process " + ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory)
+                + (page.sharedProcess ? " · shared" : "")
+        } else {
+            "Process memory unavailable"
+        }
+        return Text(caption)
+            .font(.system(size: 11, weight: .medium, design: .rounded))
+            .foregroundStyle(.white.opacity(0.88))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(.black.opacity(0.35)))
+            .position(x: rect.midX, y: rect.maxY + 16)
+            .opacity(expandedOrHidden(page) ? 0 : opacity(page, index: index))
+            .zIndex(Double(index * 2 + 1))
+            .allowsHitTesting(false)
     }
 
     private func expandedOrHidden(_ page: OverviewPage) -> Bool {
