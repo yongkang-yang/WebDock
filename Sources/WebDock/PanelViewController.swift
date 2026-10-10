@@ -280,6 +280,9 @@ final class PanelViewController: NSViewController {
         pendingPreload?.cancel()
         pendingPreload = nil
         pendingPreloadID = nil
+        if let id = preloadedID {
+            releaseWebView(id: id, preserveInteraction: true)
+        }
         if model.overview != nil {
             closeOverview(selecting: nil)
         }
@@ -373,7 +376,10 @@ final class PanelViewController: NSViewController {
         }
         selectedID = id
         model.selectedID = id
-        if preloadedID == id { preloadedID = nil }
+        if preloadedID == id {
+            preloadedID = nil
+            publishLiveIDs()
+        }
 
         guard let id, let site = site(for: id), id != homeID || webViews[homeID] != nil else {
             webViews.values.forEach { $0.isHidden = true }
@@ -460,7 +466,7 @@ final class PanelViewController: NSViewController {
         loadedURLs[id] = site.url
         loadedMobile[id] = mobile
         loadedForceDark[id] = forceDark
-        model.liveIDs = Set(webViews.keys)
+        publishLiveIDs()
         return webView
     }
 
@@ -483,13 +489,20 @@ final class PanelViewController: NSViewController {
             if let previous = self.preloadedID, previous != id, self.webViews[previous] != nil {
                 self.releaseWebView(id: previous, preserveInteraction: true)
             }
+            self.preloadedID = id
             let webView = self.makeWebView(for: site)
             webView.isHidden = true
             self.hiddenSince[id] = Date()
-            self.preloadedID = id
         }
         pendingPreload = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    /// A speculative page uses memory but is not a page the user deliberately opened.
+    private func publishLiveIDs() {
+        var ids = Set(webViews.keys)
+        if let preloadedID { ids.remove(preloadedID) }
+        model.liveIDs = ids
     }
 
     private func togglePin(id: UUID?) {
@@ -812,7 +825,7 @@ final class PanelViewController: NSViewController {
         loadedForceDark[id] = nil
         hiddenSince[id] = nil
         model.pinnedIDs.remove(id)
-        model.liveIDs = Set(webViews.keys)
+        publishLiveIDs()
     }
 
     /// Releases every web view that's off screen and has been for at least `age` seconds.
