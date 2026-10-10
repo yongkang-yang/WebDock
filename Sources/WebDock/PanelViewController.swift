@@ -56,6 +56,9 @@ final class PanelViewController: NSViewController {
 
     var onOpenSettings: (() -> Void)?
     var onClosePanel: (() -> Void)?
+    /// Reports deliberately opened pages that still have a live web view.
+    /// Includes detached windows, but excludes the search/start page and transient popups.
+    var onRunningPageCountChanged: ((Int) -> Void)?
     /// How many detached windows are open, so the app can show in the Dock while there are any.
     var onDetachedWindowsChanged: ((Int) -> Void)?
 
@@ -97,6 +100,9 @@ final class PanelViewController: NSViewController {
     private var isPanelVisible = false
     private var storeSubscription: AnyCancellable?
     private var folderSubscription: AnyCancellable?
+    private var pageCountSubscription: AnyCancellable?
+    /// Do not publish an intermediate count while a page moves into a separate window.
+    private var isTransferringToWindow = false
     private var releaseTimer: Timer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var appearanceObservation: NSKeyValueObservation?
@@ -247,6 +253,11 @@ final class PanelViewController: NSViewController {
         folderSubscription = SiteStore.shared.$folders.sink { [weak self] folders in
             self?.model.folders = folders
         }
+        // Publish from the incoming value because @Published sends before storing it.
+        // This also works when speculative preloads are omitted from model.liveIDs.
+        pageCountSubscription = model.$liveIDs.removeDuplicates().sink { [weak self] ids in
+            self?.reportRunningPageCount(liveIDs: ids)
+        }
 
         releaseTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.rememberURLs()
@@ -272,6 +283,12 @@ final class PanelViewController: NSViewController {
             }
             return event
         }
+    }
+
+    private func reportRunningPageCount(liveIDs: Set<UUID>) {
+        guard !isTransferringToWindow else { return }
+        let openSites = liveIDs.subtracting([homeID]).count
+        onRunningPageCountChanged?(openSites + detachedWindows.count)
     }
 
     // MARK: - Panel visibility
@@ -417,9 +434,13 @@ final class PanelViewController: NSViewController {
         if wasPreloaded, interactionStates[id] != nil {
             beginRestoration(id: id, webView: webView)
         }
-        // Auto-layout detection is postponed until an explicitly selected page.
-        checkAutoLayout(of: webView, site: site)
-        checkAutoDarkMode(of: webView, site: site)
+        // A page that settled while speculative skipped its layout and dark mode checks; run
+        // them now. Any other page is checked when it settles, never before it has loaded.
+        if wasPreloaded, settledPages.contains(ObjectIdentifier(webView)),
+           Site.isSameSite(webView.url?.host, site.url.host) {
+            checkAutoLayout(of: webView, site: site)
+            checkAutoDarkMode(of: webView, site: site)
+        }
         recordRecent(id: id, webView: webView)
         pageOrder.removeAll { $0 == id }
         pageOrder.append(id)
@@ -1399,6 +1420,13 @@ final class PanelViewController: NSViewController {
     /// Moves the page, as it is, into a window of its own; the panel starts afresh for the site.
     private func openInWindow(id: UUID?) {
         guard let id = id ?? selectedID, let site = site(for: id) else { return }
+        // Treat transfer as one action: the page never stops running. Suppress the
+        // temporary removal from liveIDs and publish once the window exists.
+        isTransferringToWindow = true
+        defer {
+            isTransferringToWindow = false
+            reportRunningPageCount(liveIDs: model.liveIDs)
+        }
         // A speculative view holding a saved session has not navigated. Replace
         // it with a deliberately opened view before detaching the window.
         if preloadedID == id {
@@ -1687,6 +1715,7 @@ extension PanelViewController: NSWindowDelegate {
             window.contentView = nil
             window.delegate = nil
             onDetachedWindowsChanged?(detachedWindows.count)
+            reportRunningPageCount(liveIDs: model.liveIDs)
             return
         }
         guard let index = popupWindows.firstIndex(where: { $0 === window }) else { return }
