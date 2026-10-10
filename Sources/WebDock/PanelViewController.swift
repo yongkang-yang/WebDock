@@ -393,6 +393,8 @@ final class PanelViewController: NSViewController {
             other.isHidden = otherID != id
         }
         webView.isHidden = false
+        // A site preloaded on hover counts as recent only after the user selects it.
+        recordRecent(id: id, webView: webView)
         pageOrder.removeAll { $0 == id }
         pageOrder.append(id)
         syncNavigationState()
@@ -942,7 +944,7 @@ final class PanelViewController: NSViewController {
     // MARK: - Recents
 
     private func recordRecent(id: UUID, webView: WKWebView) {
-        guard id != homeID, let site = site(for: id),
+        guard isPanelVisible, selectedID == id, id != homeID, let site = site(for: id),
               let title = webView.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
               let url = webView.url, Site.isSameSite(url.host, site.url.host) else { return }
         var recents = model.recents.filter { $0.siteID != id }
