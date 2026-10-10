@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>WebDock preload permission regression</title></head>
+<body>
+  <h1>Media request on page load</h1>
+  <p id="result">Request pending</p>
+  <script>
+    // Serve this via localhost (a secure context) and register its URL as a WebDock site.
+    // A hover-only preload MUST NOT show a permission dialog or turn on the camera.
+    addEventListener("load", async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        document.querySelector("#result").textContent = "Media granted";
+        stream.getTracks().forEach(track => track.stop());
+      } catch (error) {
+        document.querySelector("#result").textContent = "Media blocked: " + error.name;
+      }
+      // Also verify a speculative page does not open a new window.
+      window.open("about:blank", "_blank");
+    });
+  </script>
+</body>
+</html>
