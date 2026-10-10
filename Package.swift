@@ -5,7 +5,8 @@ let package = Package(
     name: "WebDock",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "WebDock", path: "Sources/WebDock")
+        .executableTarget(name: "WebDock", path: "Sources/WebDock",
+                          linkerSettings: [.linkedLibrary("proc")])
     ],
     swiftLanguageModes: [.v5]
 )
