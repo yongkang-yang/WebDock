@@ -977,6 +977,11 @@ final class PanelViewController: NSViewController {
                                 sharedProcess: pid.map { processUse[$0, default: 0] > 1 } ?? false)
         }
         model.overview = OverviewSession(pages: pages, currentID: currentID)
+        // Refresh only while the switcher is visible; sample at most once every 2 seconds.
+        overviewMemoryTimer?.invalidate()
+        overviewMemoryTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshOverviewMemory()
+        }
         overviewHost.isHidden = false
         view.window?.makeFirstResponder(overviewHost)
         // Pages never pictured yet get one now.
@@ -989,9 +994,39 @@ final class PanelViewController: NSViewController {
         }
     }
 
+    private func refreshOverviewMemory() {
+        guard let session = model.overview else { return }
+        let processes = webViews.compactMapValues { WebProcessMemory.processID(for: $0) }
+        var useCounts: [Int32: Int] = [:]
+        for pid in processes.values { useCounts[pid, default: 0] += 1 }
+        var samples: [Int32: UInt64] = [:]
+        var pages = session.pages
+        for index in pages.indices {
+            guard let pid = processes[pages[index].id] else {
+                pages[index].memoryBytes = nil
+                pages[index].sharedProcess = false
+                continue
+            }
+            if let bytes = samples[pid] {
+                pages[index].memoryBytes = bytes
+            } else {
+                let bytes = WebProcessMemory.residentBytes(for: pid)
+                pages[index].memoryBytes = bytes
+                if let bytes { samples[pid] = bytes }
+            }
+            pages[index].sharedProcess = useCounts[pid, default: 0] > 1
+        }
+        // Avoid interrupting carousel animation if the overview has been dismissed.
+        if model.overview?.id == session.id {
+            model.overview?.pages = pages
+        }
+    }
+
     /// The picked card has grown to fill the page's place; the page itself takes over from it.
     private func closeOverview(selecting id: UUID?) {
         guard model.overview != nil else { return }
+        overviewMemoryTimer?.invalidate()
+        overviewMemoryTimer = nil
         if let id, site(for: id) != nil {
             select(id: id)
         } else {
@@ -1394,7 +1429,8 @@ extension PanelViewController: WKScriptMessageHandler {
             return
         }
         guard message.name == VideoPresentation.messageName,
-              let body = message.body as? [String: Any], let webView = message.webView else { return }
+              let body = message.body as? [String: Any], let webView = message.webView,
+              !isSpeculative(webView) else { return }
         if let on = body["fullscreen"] as? Bool, message.frameInfo.isMainFrame {
             on ? enterFullscreen(webView) : exitFullscreen(webView)
         }
@@ -1416,6 +1452,7 @@ extension PanelViewController {
     fileprivate func handleAutofill(_ message: WKScriptMessage) {
         let origin = message.frameInfo.securityOrigin
         guard origin.protocol == "https", !origin.host.isEmpty, let webView = message.webView,
+              !isSpeculative(webView),
               let siteID = webViewSites.object(forKey: webView) as UUID?,
               let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         let host = origin.host.lowercased()
@@ -1522,8 +1559,8 @@ extension PanelViewController: WKNavigationDelegate {
         }
         let webSchemes: Set<String> = ["http", "https", "about", "blob", "data", "file", "javascript"]
         if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(), !webSchemes.contains(scheme) {
-            if !isSpeculative(webView),
-               navigationAction.navigationType == .linkActivated || (!isSpeculative(webView) && navigationAction.targetFrame?.isMainFrame == true) {
+            if !isSpeculative(webView) &&
+                (navigationAction.navigationType == .linkActivated || navigationAction.targetFrame?.isMainFrame == true) {
                 NSWorkspace.shared.open(url)
             }
             decisionHandler(.cancel)
