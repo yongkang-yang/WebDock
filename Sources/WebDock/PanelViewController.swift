@@ -77,7 +77,8 @@ final class PanelViewController: NSViewController {
     private var interactionStateOrder: [UUID] = []
     private let maxInteractionStateBytes = 2 * 1024 * 1024
     private let totalInteractionStateBudget = 8 * 1024 * 1024
-    private var restoringIDs: Set<UUID> = []
+    /// Awaiting-commit restorations may time out; committed ones must not be reloaded.
+    private var restorationPhases: [UUID: SessionRestorationPhase] = [:]
     private var pendingPreload: DispatchWorkItem?
     private var pendingPreloadID: UUID?
     private var preloadedID: UUID?
@@ -385,12 +386,6 @@ final class PanelViewController: NSViewController {
         }
         selectedID = id
         model.selectedID = id
-        if preloadedID == id {
-            preloadedID = nil
-            preloadExpiryWork?.cancel()
-            preloadExpiryWork = nil
-            publishLiveIDs()
-        }
 
         guard let id, let site = site(for: id), id != homeID || webViews[homeID] != nil else {
             webViews.values.forEach { $0.isHidden = true }
@@ -404,12 +399,24 @@ final class PanelViewController: NSViewController {
         // Don't spin up a web view while the panel is closed; panelDidShow will.
         guard isPanelVisible else { return }
 
+        let wasPreloaded = preloadedID == id
+        if wasPreloaded {
+            preloadedID = nil
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
+            publishLiveIDs()
+        }
         hiddenSince[id] = nil
         let webView = webViews[id] ?? makeWebView(for: site)
         for (otherID, other) in webViews {
             other.isHidden = otherID != id
         }
         webView.isHidden = false
+        // A speculative view with a saved session was prepared but not navigated.
+        // Only this deliberate selection can now apply the cached interaction state.
+        if wasPreloaded, interactionStates[id] != nil {
+            beginRestoration(id: id, webView: webView)
+        }
         // Auto-layout detection is postponed until an explicitly selected page.
         checkAutoLayout(of: webView, site: site)
         checkAutoDarkMode(of: webView, site: site)
@@ -454,20 +461,17 @@ final class PanelViewController: NSViewController {
         webView.pageZoom = pageZooms[site.id.uuidString] ?? 1
         webView.autoresizingMask = [.width, .height]
         webCard.addSubview(webView)
-        // Keep the recovery data until WebKit commits a restored navigation. A state
-        // that never starts navigation must not strand the page on an empty view.
-        if url == nil, let state = interactionStates[site.id] {
-            restoringIDs.insert(site.id)
-            webView.interactionState = state
-            let id = site.id
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, weak webView] in
-                guard let self, let webView, self.webViews[id] === webView,
-                      self.restoringIDs.contains(id) else { return }
-                self.fallbackFromFailedRestore(id: id, webView: webView)
-            }
-        } else {
+        let speculative = preloadedID == site.id
+        let hasSavedState = interactionStates[site.id] != nil
+        if SessionRestorationPolicy.shouldRestore(hasSavedState: hasSavedState,
+                                                   speculative: speculative, explicitURL: url != nil) {
+            beginRestoration(id: site.id, webView: webView)
+        } else if !SessionRestorationPolicy.shouldDeferLoad(hasSavedState: hasSavedState,
+                                                            speculative: speculative, explicitURL: url != nil) {
             webView.load(URLRequest(url: url ?? resumeURL(for: site)))
         }
+        // With a saved session, a hover only warms an empty WKWebView; nothing
+        // navigates until the user activates the site.
 
         let id = site.id
         webViewObservations[id] = [
@@ -510,8 +514,20 @@ final class PanelViewController: NSViewController {
         }
     }
 
+    private func beginRestoration(id: UUID, webView: WKWebView) {
+        guard let state = interactionStates[id] else { return }
+        restorationPhases[id] = .awaitingCommit
+        webView.interactionState = state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, weak webView] in
+            guard let self, let webView, self.webViews[id] === webView,
+                  SessionRestorationPolicy.shouldFallbackAfterTimeout(
+                      phase: self.restorationPhases[id]) else { return }
+            self.fallbackFromFailedRestore(id: id, webView: webView)
+        }
+    }
+
     private func fallbackFromFailedRestore(id: UUID, webView: WKWebView) {
-        guard restoringIDs.remove(id) != nil, webViews[id] === webView,
+        guard restorationPhases.removeValue(forKey: id) != nil, webViews[id] === webView,
               let site = site(for: id) else { return }
         // Only one normal URL load. Do not retry a broken interaction state.
         discardInteractionState(for: id)
