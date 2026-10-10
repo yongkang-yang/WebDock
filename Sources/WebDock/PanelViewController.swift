@@ -320,6 +320,8 @@ final class PanelViewController: NSViewController {
         for site in newSites {
             if let old = sites.first(where: { $0.id == site.id }), old.url != site.url || old.layout != site.layout {
                 resolvedLayouts[site.id.uuidString] = nil
+                // Never restore an interaction state into a different site or layout.
+                interactionStates[site.id] = nil
             }
             if let old = sites.first(where: { $0.id == site.id }), old.url != site.url || old.darkMode != site.darkMode {
                 resolvedDarkModes[site.id.uuidString] = nil
@@ -341,6 +343,7 @@ final class PanelViewController: NSViewController {
         pageOrder.removeAll { !validKeys.contains($0.uuidString) }
         snapshots = snapshots.filter { validKeys.contains($0.key.uuidString) }
         lastURLs = lastURLs.filter { validKeys.contains($0.key) }
+        interactionStates = interactionStates.filter { validKeys.contains($0.key.uuidString) }
         resolvedLayouts = resolvedLayouts.filter { validKeys.contains($0.key) }
         resolvedDarkModes = resolvedDarkModes.filter { validKeys.contains($0.key) }
         pageZooms = pageZooms.filter { validKeys.contains($0.key) }
