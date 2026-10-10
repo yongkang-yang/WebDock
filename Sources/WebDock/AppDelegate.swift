@@ -99,15 +99,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showPanel() {
         guard let button = statusItem.button, let buttonWindow = button.window else { return }
 
-        // Drop down from the icon, centered on it but kept inside the screen.
-        let iconFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
-        let visible = (buttonWindow.screen ?? NSScreen.main)?.visibleFrame ?? iconFrame
+        // Center horizontally on the globe, not the full status button. Its width changes
+        // when the count gains digits. Keep the bottom of the *button* as the drop anchor.
+        let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
+        let imageRect = (button.cell as? NSButtonCell)?.imageRect(forBounds: button.bounds)
+        let anchorRect = imageRect.flatMap { $0.isEmpty ? nil : $0 } ?? button.bounds
+        let globeFrame = buttonWindow.convertToScreen(button.convert(anchorRect, to: nil))
+        let visible = (buttonWindow.screen ?? NSScreen.main)?.visibleFrame ?? buttonFrame
         if panel.frame.size != PanelSize.saved {  // reset in Settings
             panel.setContentSize(PanelSize.saved)
         }
         let size = panel.frame.size
-        let x = min(max(iconFrame.midX - size.width / 2, visible.minX + 8), visible.maxX - size.width - 8)
-        panel.setFrameOrigin(NSPoint(x: x, y: iconFrame.minY - 6 - size.height))
+        let x = min(max(globeFrame.midX - size.width / 2, visible.minX + 8), visible.maxX - size.width - 8)
+        panel.setFrameOrigin(NSPoint(x: x, y: buttonFrame.minY - 6 - size.height))
 
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
