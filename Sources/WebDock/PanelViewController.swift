@@ -1792,7 +1792,8 @@ extension PanelViewController: WKUIDelegate {
             decisionHandler(.deny)
             return
         }
-        let isSelected = isPanelVisible && selectedID.flatMap { webViews[$0] } === webView
+        let isSelected = isPanelVisible && model.overview == nil && !webView.isHidden
+            && selectedID.flatMap { webViews[$0] } === webView
         let isDetached = detachedWindows.contains { $0.window.contentView === webView }
         guard SpeculativePagePolicy.allowsMediaRequest(
             isSpeculative: isSpeculative(webView),
