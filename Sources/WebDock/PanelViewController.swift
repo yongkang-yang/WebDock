@@ -71,6 +71,11 @@ final class PanelViewController: NSViewController {
     private var hiddenRailConstraints: [NSLayoutConstraint] = []
     private var sites: [Site] = []
     private var webViews: [UUID: WKWebView] = [:]
+    /// WebKit interaction states are kept only in memory: they may contain private form data.
+    private var interactionStates: [UUID: Data] = [:]
+    private var pendingPreload: DispatchWorkItem?
+    private var pendingPreloadID: UUID?
+    private var preloadedID: UUID?
     private var webViewObservations: [UUID: [NSKeyValueObservation]] = [:]
     private var loadedURLs: [UUID: URL] = [:]
     /// When each live web view last went off screen.
@@ -176,6 +181,7 @@ final class PanelViewController: NSViewController {
         applyRailMode()
 
         model.onSelect = { [weak self] id in self?.select(id: id) }
+        model.onHoverSite = { [weak self] id, inside in self?.schedulePreload(id: id, inside: inside) }
         model.onCloseSite = { [weak self] id in self?.closeSite(id: id) }
         model.onOpenInBrowser = { [weak self] id in self?.openInBrowser(id: id) }
         model.onOpenInWindow = { [weak self] id in self?.openInWindow(id: id) }
@@ -271,6 +277,9 @@ final class PanelViewController: NSViewController {
 
     func panelDidHide() {
         isPanelVisible = false
+        pendingPreload?.cancel()
+        pendingPreload = nil
+        pendingPreloadID = nil
         if model.overview != nil {
             closeOverview(selecting: nil)
         }
@@ -361,6 +370,7 @@ final class PanelViewController: NSViewController {
         }
         selectedID = id
         model.selectedID = id
+        if preloadedID == id { preloadedID = nil }
 
         guard let id, let site = site(for: id), id != homeID || webViews[homeID] != nil else {
             webViews.values.forEach { $0.isHidden = true }
@@ -420,7 +430,13 @@ final class PanelViewController: NSViewController {
         webView.pageZoom = pageZooms[site.id.uuidString] ?? 1
         webView.autoresizingMask = [.width, .height]
         webCard.addSubview(webView)
-        webView.load(URLRequest(url: url ?? resumeURL(for: site)))
+        // Restoring interactionState recreates navigation and scroll state; do not load a
+        // second request over it. Explicit URL navigation bypasses the saved state.
+        if url == nil, let state = interactionStates.removeValue(forKey: site.id) {
+            webView.interactionState = state
+        } else {
+            webView.load(URLRequest(url: url ?? resumeURL(for: site)))
+        }
 
         let id = site.id
         webViewObservations[id] = [
@@ -441,6 +457,34 @@ final class PanelViewController: NSViewController {
         loadedForceDark[id] = forceDark
         model.liveIDs = Set(webViews.keys)
         return webView
+    }
+
+    /// Start loading a hovered site after a short delay. At most one speculative page is kept.
+    /// A mouse pass over the rail must not start several network requests.
+    private func schedulePreload(id: UUID, inside: Bool) {
+        if pendingPreloadID == id || inside {
+            pendingPreload?.cancel()
+            pendingPreload = nil
+            pendingPreloadID = nil
+        }
+        guard inside, isPanelVisible, id != selectedID, site(for: id) != nil,
+              id != homeID, webViews[id] == nil else { return }
+        pendingPreloadID = id
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isPanelVisible, self.pendingPreloadID == id,
+                  let site = self.site(for: id), self.webViews[id] == nil else { return }
+            self.pendingPreload = nil
+            self.pendingPreloadID = nil
+            if let previous = self.preloadedID, previous != id, self.webViews[previous] != nil {
+                self.releaseWebView(id: previous, preserveInteraction: true)
+            }
+            let webView = self.makeWebView(for: site)
+            webView.isHidden = true
+            self.hiddenSince[id] = Date()
+            self.preloadedID = id
+        }
+        pendingPreload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
     private func togglePin(id: UUID?) {
@@ -712,7 +756,15 @@ final class PanelViewController: NSViewController {
         UserDefaults.standard.set(lastURLs, forKey: lastURLsKey)
     }
 
-    private func releaseWebView(id: UUID) {
+    private func releaseWebView(id: UUID, preserveInteraction: Bool = false) {
+        if preserveInteraction, let webView = webViews[id],
+           let state = webView.interactionState as? Data,
+           !state.isEmpty, state.count <= 2 * 1024 * 1024 {
+            interactionStates[id] = state
+        } else {
+            interactionStates[id] = nil
+        }
+        if preloadedID == id { preloadedID = nil }
         if id == homeID {  // home's search page is gone for good; a site reopens where it was
             pageOrder.removeAll { $0 == homeID }
             snapshots[homeID] = nil
@@ -765,7 +817,7 @@ final class PanelViewController: NSViewController {
             let onScreen = isPanelVisible && id == selectedID
             if !onScreen, !model.pinnedIDs.contains(id), !isPlayingElsewhere(id: id),
                let since = hiddenSince[id], since <= cutoff {
-                releaseWebView(id: id)
+                releaseWebView(id: id, preserveInteraction: true)
             }
         }
     }
@@ -817,9 +869,15 @@ final class PanelViewController: NSViewController {
     private func showOverview(currentID: UUID?) {
         guard isPanelVisible, model.overview == nil else { return }
         // Only pages that are open; a released one has no page left to go back to.
+        let processes = webViews.compactMapValues { WebProcessMemory.processID(for: $0) }
+        var processUse: [pid_t: Int] = [:]
+        for pid in processes.values { processUse[pid, default: 0] += 1 }
         let pages = pageOrder.compactMap { id -> OverviewPage? in
             guard webViews[id] != nil, let site = site(for: id) else { return nil }
-            return OverviewPage(site: site, snapshot: snapshots[id])
+            let pid = processes[id]
+            return OverviewPage(site: site, snapshot: snapshots[id],
+                                memoryBytes: pid.flatMap(WebProcessMemory.residentBytes(for:)),
+                                sharedProcess: pid.map { processUse[$0, default: 0] > 1 } ?? false)
         }
         model.overview = OverviewSession(pages: pages, currentID: currentID)
         overviewHost.isHidden = false
@@ -1188,6 +1246,7 @@ final class PanelViewController: NSViewController {
         let webView = webViews[id] ?? makeWebView(for: site)
         let wasMobile = loadedMobile[id] == true
         webView.removeFromSuperview()
+        interactionStates[id] = nil
         forgetWebView(id: id)
         webView.isHidden = false
         // A phone layout looks lost in a big window.
