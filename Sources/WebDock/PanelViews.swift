@@ -69,6 +69,8 @@ final class PanelModel: ObservableObject {
     @Published var overview: OverviewSession?
 
     var onSelect: (UUID) -> Void = { _ in }
+    /// Hovering a site may prewarm a released page; leaving cancels pending work.
+    var onHoverSite: (UUID, Bool) -> Void = { _, _ in }
     var onCloseSite: (UUID) -> Void = { _ in }
     var onOpenInBrowser: (UUID?) -> Void = { _ in }
     /// nil means the page on screen.
@@ -193,6 +195,7 @@ struct RailView: View {
             }
         }
         .onAppear { favicons.load(for: site) }
+        .onHover { inside in model.onHoverSite(site.id, inside) }
     }
 
     /// A folder is one slot whose click lists its sites in a menu.
@@ -1053,6 +1056,7 @@ private struct SiteTile: View {
             }
         }
         .onAppear { favicons.load(for: site) }
+        .onHover { inside in model.onHoverSite(site.id, inside) }
     }
 }
 
