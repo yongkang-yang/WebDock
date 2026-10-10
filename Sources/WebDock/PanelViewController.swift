@@ -87,6 +87,8 @@ final class PanelViewController: NSViewController {
     private var storeSubscription: AnyCancellable?
     private var folderSubscription: AnyCancellable?
     private var pageCountSubscription: AnyCancellable?
+    /// Do not publish an intermediate count while a page moves into a separate window.
+    private var isTransferringToWindow = false
     private var releaseTimer: Timer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var appearanceObservation: NSKeyValueObservation?
@@ -269,6 +271,7 @@ final class PanelViewController: NSViewController {
     }
 
     private func reportRunningPageCount(liveIDs: Set<UUID>) {
+        guard !isTransferringToWindow else { return }
         let openSites = liveIDs.subtracting([homeID]).count
         onRunningPageCountChanged?(openSites + detachedWindows.count)
     }
@@ -1199,6 +1202,13 @@ final class PanelViewController: NSViewController {
     /// Moves the page, as it is, into a window of its own; the panel starts afresh for the site.
     private func openInWindow(id: UUID?) {
         guard let id = id ?? selectedID, let site = site(for: id) else { return }
+        // Treat transfer as one action: the page never stops running. Suppress the
+        // temporary removal from liveIDs and publish once the window exists.
+        isTransferringToWindow = true
+        defer {
+            isTransferringToWindow = false
+            reportRunningPageCount(liveIDs: model.liveIDs)
+        }
         let webView = webViews[id] ?? makeWebView(for: site)
         let wasMobile = loadedMobile[id] == true
         webView.removeFromSuperview()
@@ -1226,7 +1236,6 @@ final class PanelViewController: NSViewController {
         }
         detachedWindows.append((window, observation))
         onDetachedWindowsChanged?(detachedWindows.count)
-        reportRunningPageCount(liveIDs: model.liveIDs)
 
         if id == selectedID {
             select(id: homeID)
