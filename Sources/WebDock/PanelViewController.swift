@@ -288,7 +288,7 @@ final class PanelViewController: NSViewController {
         pendingPreload = nil
         pendingPreloadID = nil
         if let id = preloadedID {
-            releaseWebView(id: id, preserveInteraction: true)
+            releaseWebView(id: id)
         }
         if model.overview != nil {
             closeOverview(selecting: nil)
@@ -525,6 +525,12 @@ final class PanelViewController: NSViewController {
             pendingPreload = nil
             pendingPreloadID = nil
         }
+        if preloadedID == id {
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
+            if !inside { expirePreload(id: id) }
+            return
+        }
         guard inside, isPanelVisible, id != selectedID, site(for: id) != nil,
               id != homeID, webViews[id] == nil else { return }
         pendingPreloadID = id
@@ -534,15 +540,31 @@ final class PanelViewController: NSViewController {
             self.pendingPreload = nil
             self.pendingPreloadID = nil
             if let previous = self.preloadedID, previous != id, self.webViews[previous] != nil {
-                self.releaseWebView(id: previous, preserveInteraction: true)
+                self.releaseWebView(id: previous)
             }
             self.preloadedID = id
             let webView = self.makeWebView(for: site)
             webView.isHidden = true
             self.hiddenSince[id] = Date()
+            self.expirePreload(id: id)
         }
         pendingPreload = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func expirePreload(id: UUID) {
+        preloadExpiryWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.preloadedID == id else { return }
+            self.releaseWebView(id: id)
+        }
+        preloadExpiryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + speculativeLifetime, execute: work)
+    }
+
+    private func isSpeculative(_ webView: WKWebView) -> Bool {
+        guard let id = preloadedID else { return false }
+        return webViews[id] === webView
     }
 
     /// A speculative page uses memory but is not a page the user deliberately opened.
@@ -1458,6 +1480,10 @@ extension PanelViewController {
 extension PanelViewController: WKNavigationDelegate {
     /// A new page loses the old one's fullscreen state.
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restoringIDs.remove(id) != nil {
+            discardInteractionState(for: id)
+        }
         exitFullscreen(webView)
         // Some pages never finish loading (a request that hangs, such as an ad or a stream), and
         // their layout, dark mode and icons would never be looked at; after a while, look anyway.
@@ -1470,17 +1496,34 @@ extension PanelViewController: WKNavigationDelegate {
         }
     }
 
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restoringIDs.contains(id) {
+            fallbackFromFailedRestore(id: id, webView: webView)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
+                 withError error: Error) {
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restoringIDs.contains(id) {
+            fallbackFromFailedRestore(id: id, webView: webView)
+        }
+    }
+
     /// `<a download>` links download; links to other apps (mailto:, zoommtg:, …) open those apps.
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if navigationAction.shouldPerformDownload {
-            decisionHandler(.download)
+            decisionHandler(isSpeculative(webView) ? .cancel : .download)
             return
         }
         let webSchemes: Set<String> = ["http", "https", "about", "blob", "data", "file", "javascript"]
         if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(), !webSchemes.contains(scheme) {
-            if navigationAction.navigationType == .linkActivated || navigationAction.targetFrame?.isMainFrame == true {
+            if !isSpeculative(webView),
+               navigationAction.navigationType == .linkActivated || (!isSpeculative(webView) && navigationAction.targetFrame?.isMainFrame == true) {
                 NSWorkspace.shared.open(url)
             }
             decisionHandler(.cancel)
@@ -1496,7 +1539,8 @@ extension PanelViewController: WKNavigationDelegate {
         let disposition = (navigationResponse.response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
         let isAttachment = navigationResponse.isForMainFrame && disposition.hasPrefix("attachment")
-        decisionHandler(!navigationResponse.canShowMIMEType || isAttachment ? .download : .allow)
+        let wouldDownload = !navigationResponse.canShowMIMEType || isAttachment
+        decisionHandler(wouldDownload ? (isSpeculative(webView) ? .cancel : .download) : .allow)
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
@@ -1522,8 +1566,11 @@ extension PanelViewController: WKNavigationDelegate {
               FaviconStore.key(for: site.url)?.contains("/") != true
                   || url.pathComponents.dropFirst().first == site.url.pathComponents.dropFirst().first
         else { return }
-        checkAutoLayout(of: webView, site: site)
-        checkAutoDarkMode(of: webView, site: site)
+        // Speculative pages must not resolve layouts or trigger a reload behind the user.
+        if !isSpeculative(webView) {
+            checkAutoLayout(of: webView, site: site)
+            checkAutoDarkMode(of: webView, site: site)
+        }
 
         // Links without sizes count as small, except touch icons, which are usually 180px.
         // Manifest icons only meant for masking or monochrome use rank below the rest.
@@ -1583,6 +1630,8 @@ extension PanelViewController: WKUIDelegate {
                  createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction,
                  windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // Off-screen speculative navigation must not open a popup or launch the browser.
+        guard !isSpeculative(webView) else { return nil }
         // Plain target=_blank links go to the default browser, except ones that stay on the
         // page's own site or go through Google's account chooser (e.g. switching to another
         // signed-in account), which load in place so the switch happens here.
@@ -1627,6 +1676,10 @@ extension PanelViewController: WKUIDelegate {
                  runOpenPanelWith parameters: WKOpenPanelParameters,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping ([URL]?) -> Void) {
+        guard !isSpeculative(webView) else {
+            completionHandler(nil)
+            return
+        }
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.canChooseDirectories = parameters.allowsDirectories
@@ -1640,6 +1693,10 @@ extension PanelViewController: WKUIDelegate {
                  runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping () -> Void) {
+        guard !isSpeculative(webView) else {
+            completionHandler()
+            return
+        }
         let alert = NSAlert()
         alert.messageText = message
         alert.runModal()
@@ -1650,6 +1707,10 @@ extension PanelViewController: WKUIDelegate {
                  runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping (Bool) -> Void) {
+        guard !isSpeculative(webView) else {
+            completionHandler(false)
+            return
+        }
         let alert = NSAlert()
         alert.messageText = message
         alert.addButton(withTitle: "OK")
@@ -1662,6 +1723,10 @@ extension PanelViewController: WKUIDelegate {
                  defaultText: String?,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping (String?) -> Void) {
+        guard !isSpeculative(webView) else {
+            completionHandler(nil)
+            return
+        }
         let alert = NSAlert()
         alert.messageText = prompt
         let field = NSTextField(string: defaultText ?? "")
@@ -1681,6 +1746,17 @@ extension PanelViewController: WKUIDelegate {
                  initiatedByFrame frame: WKFrameInfo,
                  type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        // Never authorize camera or microphone just because the pointer hovered an icon.
+        guard !isSpeculative(webView) else {
+            decisionHandler(.deny)
+            return
+        }
+        let isSelected = isPanelVisible && selectedID.flatMap { webViews[$0] } === webView
+        let isDetached = detachedWindows.contains { $0.window.contentView === webView }
+        guard isSelected || isDetached else {
+            decisionHandler(.deny)
+            return
+        }
         decisionHandler(Site.isSameSite(origin.host, webView.url?.host) ? .grant : .prompt)
     }
 }
