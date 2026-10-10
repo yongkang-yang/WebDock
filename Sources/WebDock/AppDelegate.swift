@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMainMenu()
 
+        // Reserve just enough room for the globe, plus a count when a page is running.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
             // The bare symbol draws at the menu bar's small default and looks
@@ -19,6 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = NSImage(systemSymbolName: "globe", accessibilityDescription: "WebDock")?
                 .withSymbolConfiguration(configuration)
             button.image?.isTemplate = true
+            button.imagePosition = .imageLeading
+            button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
             button.action = #selector(statusItemClicked(_:))
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -26,6 +29,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         panelController.onOpenSettings = { [weak self] in self?.openSettings(nil) }
         panelController.onClosePanel = { [weak self] in self?.closePanel() }
+        panelController.onRunningPageCountChanged = { [weak self] count in
+            self?.showRunningPageCount(count)
+        }
+        showRunningPageCount(0)
         // A page in its own window should be reachable from the Dock and ⌘Tab.
         panelController.onDetachedWindowsChanged = { count in
             NSApp.setActivationPolicy(count > 0 ? .regular : .accessory)
@@ -47,6 +54,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--show-panel") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.showPanel() }
         }
+    }
+
+    /// Show a count only while pages remain alive. No preview or extra menu is added.
+    private func showRunningPageCount(_ count: Int) {
+        guard let button = statusItem.button else { return }
+        button.title = count > 0 ? String(count) : ""
+        // Keep the original compact icon when no sites are running.
+        statusItem.length = count > 0 ? NSStatusItem.variableLength : NSStatusItem.squareLength
+        let label = count == 0 ? "WebDock, no running pages" :
+            "WebDock, \(count) running \(count == 1 ? "page" : "pages")"
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
     }
 
     /// Switching to another app (Cmd+Tab, clicking its window, "open in browser") closes the panel.
