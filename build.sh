@@ -3,6 +3,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Block Mac App Store packaging while this app still uses private WebKit APIs
+# (_webProcessIdentifier for memory, _close and picture-in-picture preferences).
+if [ "${WEB_DOCK_APP_STORE:-0}" = "1" ]; then
+    echo "error: Mac App Store build is unsupported until private WebKit APIs are removed." >&2
+    exit 1
+fi
+
 swift build -c release
 
 APP=build/WebDock.app

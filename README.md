@@ -9,7 +9,9 @@ A macOS menu bar app that keeps your favorite web apps — ChatGPT, Claude, Gemi
 - **Sidebar** — site icons beside the page; the button at the top left shows or hides it. `⌘1`–`⌘9` switch sites, `⇧⌘H` goes home, `⌘T` opens a fresh start page.
 - **All pages** — `⇧⌘\`, the button at the header's far right, or a trackpad pinch in shows the open pages as cards, like the iPhone's app switcher. Scroll or swipe through them, click one (or pinch out) to open it, drag one up to close its page; `Esc` goes back.
 - **Stays logged in** — each site keeps its cookies; Google sign-in works in the embedded browser.
-- **Memory-friendly** — sites load only when opened; pages off screen for 3 minutes are released and resume where you left off. Pin a page (the header's pin) to keep it loaded in the background.
+- **Memory-friendly** — sites load on demand. Off-screen pages are released after 3 minutes; their WebKit interaction state is held temporarily in memory for recovery (navigation, scroll position, and some form data), while cookies remain persistent. A restore that fails or never commits navigation within 8 seconds falls back to the last URL; a page that has already committed navigation is not interrupted just because additional resources are slow. Cache limits: 2 MB per site and 8 MB total, with oldest-first eviction. Pinned pages stay loaded. State does not survive quitting WebDock, and web apps may not restore unsent drafts.
+- **Hover preloading** — pointing at a sidebar icon or start-page tile for 250 ms prepares that site in the background (one speculative `WKWebView` at a time). Pages without a saved interaction state can begin loading immediately; pages **with** a saved interaction state only prepare an empty view and defer session restoration until the user actually selects the site. Hover expiry, replacement, and panel hide leave the saved state and last visited URL untouched. Speculative pages expire after 12 seconds and must not request camera/microphone access, open popups, or launch external apps. Responsive layout checks are delayed until selection.
+- **Switcher process memory** — Show All Pages displays a best-effort resident memory reading below each live page. This is the WebKit content **process** memory, not per-page allocation. Processes may be shared. The reading may be unavailable if WebKit changes its private process-ID interface.
 - **Adapts to the page** — the glass takes on the page's color, and the chrome goes light or dark with it.
 - **Per-site layout** — Auto / Desktop / Mobile. Auto switches desktop-only sites to their mobile version when they don't fit.
 - **Per-site dark mode** — Auto / Force / Off. Auto darkens pages that ignore the system's dark mode, and follows the system live.
@@ -45,6 +47,27 @@ For UI work, `open build/WebDock.app --args --show-panel` opens the panel on lau
 - Right-click a sidebar icon to open the site in your browser or its own window, close its page, or change its layout and dark mode.
 - `⌘W`, or the ✕ at the header's right, closes the page on screen; the ✕ asks for a second click so a stray one doesn't. On the start page, `⌘W` closes the panel.
 - Settings (`⌘,`) has an Open at Login switch, the global shortcut, and whether the start page puts your most used sites first.
+
+## Validation and distribution
+
+The macOS GitHub Actions job runs `swift test` (including the hover-preload safety
+regression) and `./build.sh`. For the real-WebKit media check, serve the included
+`Tests/Fixtures/media-on-load.html` from localhost, add the local address as a
+site, and hover over its icon without clicking. The camera/microphone must remain
+off and no popup should appear. Select the page to check that explicit use follows
+normal permission handling. Repeat with the panel hidden.
+
+Also manually check hover-only restore preservation: idle-release a site with a known scroll position and deep URL, hover its icon without clicking, let the preload expire or hide the panel, then explicitly reopen and verify that the saved session and URL survive. For a slow restore, navigate to a page that commits a document but continues loading for more than eight seconds, and verify that it is not automatically replaced by another URL load.\n\nAlso manually check that (1) a page restores after a three-minute idle release;
+(2) a broken interaction state falls back to its last URL; (3) hover followed by
+desktop-to-mobile auto layout still loads a usable page; (4) moving a page into a
+separate window does not leave a stale preload; and (5) the switcher's process
+memory values update only while the switcher is open.
+
+**Direct distribution only:** WebDock currently relies on private WebKit selectors
+for process-memory identification and other existing features. Do not submit it to
+the Mac App Store. The build script rejects `WEB_DOCK_APP_STORE=1` until a public
+implementation replaces all private selectors. Memory values represent a WebKit
+process, not the exclusive memory of one tab.
 
 ## License
 

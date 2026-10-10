@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import WebKit
+import WebDockPolicies
 
 /// The panel content: a rail of site icons on the left, a header and the active web page on the right.
 ///
@@ -74,6 +75,19 @@ final class PanelViewController: NSViewController {
     private var hiddenRailConstraints: [NSLayoutConstraint] = []
     private var sites: [Site] = []
     private var webViews: [UUID: WKWebView] = [:]
+    /// WebKit interaction states are kept only in memory: they may contain private form data.
+    private var interactionStates: [UUID: Data] = [:]
+    private var interactionStateOrder: [UUID] = []
+    private let maxInteractionStateBytes = 2 * 1024 * 1024
+    private let totalInteractionStateBudget = 8 * 1024 * 1024
+    /// Awaiting-commit restorations may time out; committed ones must not be reloaded.
+    private var restorationPhases: [UUID: SessionRestorationPhase] = [:]
+    private var pendingPreload: DispatchWorkItem?
+    private var pendingPreloadID: UUID?
+    private var preloadedID: UUID?
+    private var preloadExpiryWork: DispatchWorkItem?
+    private let speculativeLifetime: TimeInterval = 12
+    private var overviewMemoryTimer: Timer?
     private var webViewObservations: [UUID: [NSKeyValueObservation]] = [:]
     private var loadedURLs: [UUID: URL] = [:]
     /// When each live web view last went off screen.
@@ -182,6 +196,7 @@ final class PanelViewController: NSViewController {
         applyRailMode()
 
         model.onSelect = { [weak self] id in self?.select(id: id) }
+        model.onHoverSite = { [weak self] id, inside in self?.schedulePreload(id: id, inside: inside) }
         model.onCloseSite = { [weak self] id in self?.closeSite(id: id) }
         model.onOpenInBrowser = { [weak self] id in self?.openInBrowser(id: id) }
         model.onOpenInWindow = { [weak self] id in self?.openInWindow(id: id) }
@@ -288,6 +303,12 @@ final class PanelViewController: NSViewController {
 
     func panelDidHide() {
         isPanelVisible = false
+        pendingPreload?.cancel()
+        pendingPreload = nil
+        pendingPreloadID = nil
+        if let id = preloadedID {
+            releaseWebView(id: id)
+        }
         if model.overview != nil {
             closeOverview(selecting: nil)
         }
@@ -328,6 +349,8 @@ final class PanelViewController: NSViewController {
         for site in newSites {
             if let old = sites.first(where: { $0.id == site.id }), old.url != site.url || old.layout != site.layout {
                 resolvedLayouts[site.id.uuidString] = nil
+                // Never restore an interaction state into a different site or layout.
+                discardInteractionState(for: site.id)
             }
             if let old = sites.first(where: { $0.id == site.id }), old.url != site.url || old.darkMode != site.darkMode {
                 resolvedDarkModes[site.id.uuidString] = nil
@@ -349,6 +372,8 @@ final class PanelViewController: NSViewController {
         pageOrder.removeAll { !validKeys.contains($0.uuidString) }
         snapshots = snapshots.filter { validKeys.contains($0.key.uuidString) }
         lastURLs = lastURLs.filter { validKeys.contains($0.key) }
+        interactionStates = interactionStates.filter { validKeys.contains($0.key.uuidString) }
+        interactionStateOrder.removeAll { !validKeys.contains($0.uuidString) }
         resolvedLayouts = resolvedLayouts.filter { validKeys.contains($0.key) }
         resolvedDarkModes = resolvedDarkModes.filter { validKeys.contains($0.key) }
         pageZooms = pageZooms.filter { validKeys.contains($0.key) }
@@ -391,12 +416,32 @@ final class PanelViewController: NSViewController {
         // Don't spin up a web view while the panel is closed; panelDidShow will.
         guard isPanelVisible else { return }
 
+        let wasPreloaded = preloadedID == id
+        if wasPreloaded {
+            preloadedID = nil
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
+            publishLiveIDs()
+        }
         hiddenSince[id] = nil
         let webView = webViews[id] ?? makeWebView(for: site)
         for (otherID, other) in webViews {
             other.isHidden = otherID != id
         }
         webView.isHidden = false
+        // A speculative view with a saved session was prepared but not navigated.
+        // Only this deliberate selection can now apply the cached interaction state.
+        if wasPreloaded, interactionStates[id] != nil {
+            beginRestoration(id: id, webView: webView)
+        }
+        // A page that settled while speculative skipped its layout and dark mode checks; run
+        // them now. Any other page is checked when it settles, never before it has loaded.
+        if wasPreloaded, settledPages.contains(ObjectIdentifier(webView)),
+           Site.isSameSite(webView.url?.host, site.url.host) {
+            checkAutoLayout(of: webView, site: site)
+            checkAutoDarkMode(of: webView, site: site)
+        }
+        recordRecent(id: id, webView: webView)
         pageOrder.removeAll { $0 == id }
         pageOrder.append(id)
         syncNavigationState()
@@ -437,7 +482,6 @@ final class PanelViewController: NSViewController {
         webView.pageZoom = pageZooms[site.id.uuidString] ?? 1
         webView.autoresizingMask = [.width, .height]
         webCard.addSubview(webView)
-        webView.load(URLRequest(url: url ?? resumeURL(for: site)))
 
         let id = site.id
         webViewObservations[id] = [
@@ -456,8 +500,118 @@ final class PanelViewController: NSViewController {
         loadedURLs[id] = site.url
         loadedMobile[id] = mobile
         loadedForceDark[id] = forceDark
-        model.liveIDs = Set(webViews.keys)
+        publishLiveIDs()
+        // Register the view and observers before starting navigation or restoration:
+        // synchronous WebKit callbacks must see the correct live instance.
+        let speculative = preloadedID == site.id
+        let hasSavedState = interactionStates[site.id] != nil
+        if SessionRestorationPolicy.shouldRestore(hasSavedState: hasSavedState,
+                                                   speculative: speculative, explicitURL: url != nil) {
+            beginRestoration(id: site.id, webView: webView)
+        } else if !SessionRestorationPolicy.shouldDeferLoad(hasSavedState: hasSavedState,
+                                                            speculative: speculative, explicitURL: url != nil) {
+            webView.load(URLRequest(url: url ?? resumeURL(for: site)))
+        }
+        // With a saved session, a hover only warms an empty WKWebView; nothing
+        // navigates until the user activates the site.
         return webView
+    }
+
+    /// Stored interaction data can contain form content. Keep only a small, bounded
+    /// in-memory cache and remove the oldest entries when it exceeds its budget.
+    private func discardInteractionState(for id: UUID) {
+        interactionStates[id] = nil
+        interactionStateOrder.removeAll { $0 == id }
+    }
+
+    private func saveInteractionState(_ state: Data, for id: UUID) {
+        discardInteractionState(for: id)
+        guard !state.isEmpty, state.count <= maxInteractionStateBytes else { return }
+        interactionStates[id] = state
+        interactionStateOrder.append(id)
+        var total = interactionStates.values.reduce(0) { $0 + $1.count }
+        while total > totalInteractionStateBudget, !interactionStateOrder.isEmpty {
+            let oldest = interactionStateOrder[0]
+            total -= interactionStates[oldest]?.count ?? 0
+            discardInteractionState(for: oldest)
+        }
+    }
+
+    private func beginRestoration(id: UUID, webView: WKWebView) {
+        guard let state = interactionStates[id] else { return }
+        restorationPhases[id] = .awaitingCommit
+        webView.interactionState = state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, weak webView] in
+            guard let self, let webView, self.webViews[id] === webView,
+                  SessionRestorationPolicy.shouldFallbackAfterTimeout(
+                      phase: self.restorationPhases[id]) else { return }
+            self.fallbackFromFailedRestore(id: id, webView: webView)
+        }
+    }
+
+    private func fallbackFromFailedRestore(id: UUID, webView: WKWebView) {
+        guard restorationPhases.removeValue(forKey: id) != nil, webViews[id] === webView,
+              let site = site(for: id) else { return }
+        // Only one normal URL load. Do not retry a broken interaction state.
+        discardInteractionState(for: id)
+        webView.load(URLRequest(url: resumeURL(for: site)))
+    }
+
+    /// Start loading a hovered site after a short delay. At most one speculative page is kept.
+    /// A mouse pass over the rail must not start several network requests.
+    private func schedulePreload(id: UUID, inside: Bool) {
+        if pendingPreloadID == id || inside {
+            pendingPreload?.cancel()
+            pendingPreload = nil
+            pendingPreloadID = nil
+        }
+        if preloadedID == id {
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
+            if !inside { expirePreload(id: id) }
+            return
+        }
+        guard inside, isPanelVisible, id != selectedID, site(for: id) != nil,
+              id != homeID, webViews[id] == nil else { return }
+        pendingPreloadID = id
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isPanelVisible, self.pendingPreloadID == id,
+                  let site = self.site(for: id), self.webViews[id] == nil else { return }
+            self.pendingPreload = nil
+            self.pendingPreloadID = nil
+            if let previous = self.preloadedID, previous != id, self.webViews[previous] != nil {
+                self.releaseWebView(id: previous)
+            }
+            self.preloadedID = id
+            let webView = self.makeWebView(for: site)
+            webView.isHidden = true
+            self.hiddenSince[id] = Date()
+            self.expirePreload(id: id)
+        }
+        pendingPreload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func expirePreload(id: UUID) {
+        preloadExpiryWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.preloadedID == id else { return }
+            self.releaseWebView(id: id)
+        }
+        preloadExpiryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + speculativeLifetime, execute: work)
+    }
+
+    private func isSpeculative(_ webView: WKWebView) -> Bool {
+        guard let id = preloadedID else { return false }
+        return webViews[id] === webView
+    }
+
+    /// A speculative page uses memory but is not a page the user deliberately opened.
+    private func publishLiveIDs() {
+        var ids = Set(webViews.keys)
+        if let preloadedID { ids.remove(preloadedID) }
+        model.liveIDs = ids
     }
 
     private func togglePin(id: UUID?) {
@@ -721,7 +875,7 @@ final class PanelViewController: NSViewController {
     }
 
     private func rememberURLs() {
-        for (id, webView) in webViews {
+        for (id, webView) in webViews where id != preloadedID {
             if let url = webView.url {
                 lastURLs[id.uuidString] = url.absoluteString
             }
@@ -729,7 +883,24 @@ final class PanelViewController: NSViewController {
         UserDefaults.standard.set(lastURLs, forKey: lastURLsKey)
     }
 
-    private func releaseWebView(id: UUID) {
+    private func releaseWebView(id: UUID, preserveInteraction: Bool = false) {
+        let speculative = preloadedID == id
+        // A hover-only view does not own the saved session. Expiry, replacement
+        // and panel hide must not overwrite or discard that session or URL.
+        if SessionRestorationPolicy.shouldKeepCachedStateWhenClosing(speculative: speculative) {
+            // No mutation: the snapshot survives until explicit user activation.
+        } else if preserveInteraction, let webView = webViews[id],
+                  let state = webView.interactionState as? Data {
+            saveInteractionState(state, for: id)
+        } else {
+            discardInteractionState(for: id)
+        }
+        restorationPhases[id] = nil
+        if preloadedID == id {
+            preloadedID = nil
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
+        }
         if id == homeID {  // home's search page is gone for good; a site reopens where it was
             pageOrder.removeAll { $0 == homeID }
             snapshots[homeID] = nil
@@ -739,7 +910,7 @@ final class PanelViewController: NSViewController {
             Self.closePage(of: webView)
             settledPages.remove(ObjectIdentifier(webView))
         }
-        forgetWebView(id: id)
+        forgetWebView(id: id, rememberLocation: !speculative)
     }
 
     /// AppKit's tooltip manager and Writing Tools' affordance hold on to the last web view that
@@ -755,8 +926,8 @@ final class PanelViewController: NSViewController {
     }
 
     /// Drops the panel's hold on a site's web view, remembering where it was.
-    private func forgetWebView(id: UUID) {
-        if let url = webViews[id]?.url {
+    private func forgetWebView(id: UUID, rememberLocation: Bool = true) {
+        if rememberLocation, let url = webViews[id]?.url {
             lastURLs[id.uuidString] = url.absoluteString
             UserDefaults.standard.set(lastURLs, forKey: lastURLsKey)
         }
@@ -765,6 +936,12 @@ final class PanelViewController: NSViewController {
         }
         webViewObservations[id] = nil
         webViews[id] = nil
+        restorationPhases[id] = nil
+        if preloadedID == id {
+            preloadedID = nil
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
+        }
         snapshots[id] = nil
         model.badges[id] = nil
         loadedURLs[id] = nil
@@ -772,7 +949,7 @@ final class PanelViewController: NSViewController {
         loadedForceDark[id] = nil
         hiddenSince[id] = nil
         model.pinnedIDs.remove(id)
-        model.liveIDs = Set(webViews.keys)
+        publishLiveIDs()
     }
 
     /// Releases every web view that's off screen and has been for at least `age` seconds.
@@ -782,7 +959,7 @@ final class PanelViewController: NSViewController {
             let onScreen = isPanelVisible && id == selectedID
             if !onScreen, !model.pinnedIDs.contains(id), !isPlayingElsewhere(id: id),
                let since = hiddenSince[id], since <= cutoff {
-                releaseWebView(id: id)
+                releaseWebView(id: id, preserveInteraction: true)
             }
         }
     }
@@ -834,11 +1011,22 @@ final class PanelViewController: NSViewController {
     private func showOverview(currentID: UUID?) {
         guard isPanelVisible, model.overview == nil else { return }
         // Only pages that are open; a released one has no page left to go back to.
+        let processes = webViews.compactMapValues { WebProcessMemory.processID(for: $0) }
+        var processUse: [Int32: Int] = [:]
+        for pid in processes.values { processUse[pid, default: 0] += 1 }
         let pages = pageOrder.compactMap { id -> OverviewPage? in
             guard webViews[id] != nil, let site = site(for: id) else { return nil }
-            return OverviewPage(site: site, snapshot: snapshots[id])
+            let pid = processes[id]
+            return OverviewPage(site: site, snapshot: snapshots[id],
+                                memoryBytes: pid.flatMap(WebProcessMemory.residentBytes(for:)),
+                                sharedProcess: pid.map { processUse[$0, default: 0] > 1 } ?? false)
         }
         model.overview = OverviewSession(pages: pages, currentID: currentID)
+        // Refresh only while the switcher is visible; sample at most once every 2 seconds.
+        overviewMemoryTimer?.invalidate()
+        overviewMemoryTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshOverviewMemory()
+        }
         overviewHost.isHidden = false
         view.window?.makeFirstResponder(overviewHost)
         // Pages never pictured yet get one now.
@@ -851,9 +1039,39 @@ final class PanelViewController: NSViewController {
         }
     }
 
+    private func refreshOverviewMemory() {
+        guard let session = model.overview else { return }
+        let processes = webViews.compactMapValues { WebProcessMemory.processID(for: $0) }
+        var useCounts: [Int32: Int] = [:]
+        for pid in processes.values { useCounts[pid, default: 0] += 1 }
+        var samples: [Int32: UInt64] = [:]
+        var pages = session.pages
+        for index in pages.indices {
+            guard let pid = processes[pages[index].id] else {
+                pages[index].memoryBytes = nil
+                pages[index].sharedProcess = false
+                continue
+            }
+            if let bytes = samples[pid] {
+                pages[index].memoryBytes = bytes
+            } else {
+                let bytes = WebProcessMemory.residentBytes(for: pid)
+                pages[index].memoryBytes = bytes
+                if let bytes { samples[pid] = bytes }
+            }
+            pages[index].sharedProcess = useCounts[pid, default: 0] > 1
+        }
+        // Avoid interrupting carousel animation if the overview has been dismissed.
+        if model.overview?.id == session.id {
+            model.overview?.pages = pages
+        }
+    }
+
     /// The picked card has grown to fill the page's place; the page itself takes over from it.
     private func closeOverview(selecting id: UUID?) {
         guard model.overview != nil else { return }
+        overviewMemoryTimer?.invalidate()
+        overviewMemoryTimer = nil
         if let id, site(for: id) != nil {
             select(id: id)
         } else {
@@ -898,7 +1116,7 @@ final class PanelViewController: NSViewController {
     // MARK: - Recents
 
     private func recordRecent(id: UUID, webView: WKWebView) {
-        guard id != homeID, let site = site(for: id),
+        guard isPanelVisible, selectedID == id, id != homeID, let site = site(for: id),
               let title = webView.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
               let url = webView.url, Site.isSameSite(url.host, site.url.host) else { return }
         var recents = model.recents.filter { $0.siteID != id }
@@ -1209,9 +1427,15 @@ final class PanelViewController: NSViewController {
             isTransferringToWindow = false
             reportRunningPageCount(liveIDs: model.liveIDs)
         }
+        // A speculative view holding a saved session has not navigated. Replace
+        // it with a deliberately opened view before detaching the window.
+        if preloadedID == id {
+            releaseWebView(id: id)
+        }
         let webView = webViews[id] ?? makeWebView(for: site)
         let wasMobile = loadedMobile[id] == true
         webView.removeFromSuperview()
+        discardInteractionState(for: id)
         forgetWebView(id: id)
         webView.isHidden = false
         // A phone layout looks lost in a big window.
@@ -1262,7 +1486,8 @@ extension PanelViewController: WKScriptMessageHandler {
             return
         }
         guard message.name == VideoPresentation.messageName,
-              let body = message.body as? [String: Any], let webView = message.webView else { return }
+              let body = message.body as? [String: Any], let webView = message.webView,
+              !isSpeculative(webView) else { return }
         if let on = body["fullscreen"] as? Bool, message.frameInfo.isMainFrame {
             on ? enterFullscreen(webView) : exitFullscreen(webView)
         }
@@ -1284,6 +1509,7 @@ extension PanelViewController {
     fileprivate func handleAutofill(_ message: WKScriptMessage) {
         let origin = message.frameInfo.securityOrigin
         guard origin.protocol == "https", !origin.host.isEmpty, let webView = message.webView,
+              !isSpeculative(webView),
               let siteID = webViewSites.object(forKey: webView) as UUID?,
               let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         let host = origin.host.lowercased()
@@ -1348,6 +1574,10 @@ extension PanelViewController {
 extension PanelViewController: WKNavigationDelegate {
     /// A new page loses the old one's fullscreen state.
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restorationPhases[id] == .awaitingCommit {
+            restorationPhases[id] = .committed
+        }
         exitFullscreen(webView)
         // Some pages never finish loading (a request that hangs, such as an ad or a stream), and
         // their layout, dark mode and icons would never be looked at; after a while, look anyway.
@@ -1360,17 +1590,35 @@ extension PanelViewController: WKNavigationDelegate {
         }
     }
 
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restorationPhases[id] != nil {
+            fallbackFromFailedRestore(id: id, webView: webView)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
+                 withError error: Error) {
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restorationPhases[id] != nil {
+            fallbackFromFailedRestore(id: id, webView: webView)
+        }
+    }
+
     /// `<a download>` links download; links to other apps (mailto:, zoommtg:, …) open those apps.
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if navigationAction.shouldPerformDownload {
-            decisionHandler(.download)
+            decisionHandler(SpeculativePagePolicy.allowsInteractiveSideEffects(
+                isSpeculative: isSpeculative(webView)) ? .download : .cancel)
             return
         }
         let webSchemes: Set<String> = ["http", "https", "about", "blob", "data", "file", "javascript"]
         if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(), !webSchemes.contains(scheme) {
-            if navigationAction.navigationType == .linkActivated || navigationAction.targetFrame?.isMainFrame == true {
+            if !isSpeculative(webView) &&
+                (navigationAction.navigationType == .linkActivated || navigationAction.targetFrame?.isMainFrame == true) {
                 NSWorkspace.shared.open(url)
             }
             decisionHandler(.cancel)
@@ -1386,7 +1634,8 @@ extension PanelViewController: WKNavigationDelegate {
         let disposition = (navigationResponse.response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
         let isAttachment = navigationResponse.isForMainFrame && disposition.hasPrefix("attachment")
-        decisionHandler(!navigationResponse.canShowMIMEType || isAttachment ? .download : .allow)
+        let wouldDownload = !navigationResponse.canShowMIMEType || isAttachment
+        decisionHandler(wouldDownload ? (isSpeculative(webView) ? .cancel : .download) : .allow)
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
@@ -1400,6 +1649,11 @@ extension PanelViewController: WKNavigationDelegate {
     /// Hands the icons the page declares, in its links and its web app manifest, to the favicon
     /// store, largest first.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // A committed navigation can still fail. Clear recovery data after a finish.
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restorationPhases.removeValue(forKey: id) != nil {
+            discardInteractionState(for: id)
+        }
         pageDidSettle(webView)
     }
 
@@ -1412,8 +1666,11 @@ extension PanelViewController: WKNavigationDelegate {
               FaviconStore.key(for: site.url)?.contains("/") != true
                   || url.pathComponents.dropFirst().first == site.url.pathComponents.dropFirst().first
         else { return }
-        checkAutoLayout(of: webView, site: site)
-        checkAutoDarkMode(of: webView, site: site)
+        // Speculative pages must not resolve layouts or trigger a reload behind the user.
+        if !isSpeculative(webView) {
+            checkAutoLayout(of: webView, site: site)
+            checkAutoDarkMode(of: webView, site: site)
+        }
 
         // Links without sizes count as small, except touch icons, which are usually 180px.
         // Manifest icons only meant for masking or monochrome use rank below the rest.
@@ -1474,6 +1731,9 @@ extension PanelViewController: WKUIDelegate {
                  createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction,
                  windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // Off-screen speculative navigation must not open a popup or launch the browser.
+        guard SpeculativePagePolicy.allowsInteractiveSideEffects(isSpeculative: isSpeculative(webView))
+        else { return nil }
         // Plain target=_blank links go to the default browser, except ones that stay on the
         // page's own site or go through Google's account chooser (e.g. switching to another
         // signed-in account), which load in place so the switch happens here.
@@ -1518,6 +1778,10 @@ extension PanelViewController: WKUIDelegate {
                  runOpenPanelWith parameters: WKOpenPanelParameters,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping ([URL]?) -> Void) {
+        guard !isSpeculative(webView) else {
+            completionHandler(nil)
+            return
+        }
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.canChooseDirectories = parameters.allowsDirectories
@@ -1531,6 +1795,10 @@ extension PanelViewController: WKUIDelegate {
                  runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping () -> Void) {
+        guard !isSpeculative(webView) else {
+            completionHandler()
+            return
+        }
         let alert = NSAlert()
         alert.messageText = message
         alert.runModal()
@@ -1541,6 +1809,10 @@ extension PanelViewController: WKUIDelegate {
                  runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping (Bool) -> Void) {
+        guard !isSpeculative(webView) else {
+            completionHandler(false)
+            return
+        }
         let alert = NSAlert()
         alert.messageText = message
         alert.addButton(withTitle: "OK")
@@ -1553,6 +1825,10 @@ extension PanelViewController: WKUIDelegate {
                  defaultText: String?,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping (String?) -> Void) {
+        guard !isSpeculative(webView) else {
+            completionHandler(nil)
+            return
+        }
         let alert = NSAlert()
         alert.messageText = prompt
         let field = NSTextField(string: defaultText ?? "")
@@ -1572,6 +1848,22 @@ extension PanelViewController: WKUIDelegate {
                  initiatedByFrame frame: WKFrameInfo,
                  type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        // Never authorize camera or microphone just because the pointer hovered an icon.
+        guard !isSpeculative(webView) else {
+            decisionHandler(.deny)
+            return
+        }
+        let isSelected = isPanelVisible && model.overview == nil && !webView.isHidden
+            && selectedID.flatMap { webViews[$0] } === webView
+        let isDetached = detachedWindows.contains { $0.window.contentView === webView }
+        guard SpeculativePagePolicy.allowsMediaRequest(
+            isSpeculative: isSpeculative(webView),
+            isSelectedAndVisible: isSelected,
+            isDetachedWindow: isDetached
+        ) else {
+            decisionHandler(.deny)
+            return
+        }
         decisionHandler(Site.isSameSite(origin.host, webView.url?.host) ? .grant : .prompt)
     }
 }
