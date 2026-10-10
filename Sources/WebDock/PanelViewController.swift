@@ -73,9 +73,16 @@ final class PanelViewController: NSViewController {
     private var webViews: [UUID: WKWebView] = [:]
     /// WebKit interaction states are kept only in memory: they may contain private form data.
     private var interactionStates: [UUID: Data] = [:]
+    private var interactionStateOrder: [UUID] = []
+    private let maxInteractionStateBytes = 2 * 1024 * 1024
+    private let totalInteractionStateBudget = 8 * 1024 * 1024
+    private var restoringIDs: Set<UUID> = []
     private var pendingPreload: DispatchWorkItem?
     private var pendingPreloadID: UUID?
     private var preloadedID: UUID?
+    private var preloadExpiryWork: DispatchWorkItem?
+    private let speculativeLifetime: TimeInterval = 12
+    private var overviewMemoryTimer: Timer?
     private var webViewObservations: [UUID: [NSKeyValueObservation]] = [:]
     private var loadedURLs: [UUID: URL] = [:]
     /// When each live web view last went off screen.
@@ -324,7 +331,7 @@ final class PanelViewController: NSViewController {
             if let old = sites.first(where: { $0.id == site.id }), old.url != site.url || old.layout != site.layout {
                 resolvedLayouts[site.id.uuidString] = nil
                 // Never restore an interaction state into a different site or layout.
-                interactionStates[site.id] = nil
+                discardInteractionState(for: site.id)
             }
             if let old = sites.first(where: { $0.id == site.id }), old.url != site.url || old.darkMode != site.darkMode {
                 resolvedDarkModes[site.id.uuidString] = nil
@@ -347,6 +354,7 @@ final class PanelViewController: NSViewController {
         snapshots = snapshots.filter { validKeys.contains($0.key.uuidString) }
         lastURLs = lastURLs.filter { validKeys.contains($0.key) }
         interactionStates = interactionStates.filter { validKeys.contains($0.key.uuidString) }
+        interactionStateOrder.removeAll { !validKeys.contains($0.uuidString) }
         resolvedLayouts = resolvedLayouts.filter { validKeys.contains($0.key) }
         resolvedDarkModes = resolvedDarkModes.filter { validKeys.contains($0.key) }
         pageZooms = pageZooms.filter { validKeys.contains($0.key) }
@@ -378,6 +386,8 @@ final class PanelViewController: NSViewController {
         model.selectedID = id
         if preloadedID == id {
             preloadedID = nil
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
             publishLiveIDs()
         }
 
@@ -399,7 +409,9 @@ final class PanelViewController: NSViewController {
             other.isHidden = otherID != id
         }
         webView.isHidden = false
-        // A site preloaded on hover counts as recent only after the user selects it.
+        // Auto-layout detection is postponed until an explicitly selected page.
+        checkAutoLayout(of: webView, site: site)
+        checkAutoDarkMode(of: webView, site: site)
         recordRecent(id: id, webView: webView)
         pageOrder.removeAll { $0 == id }
         pageOrder.append(id)
@@ -441,10 +453,17 @@ final class PanelViewController: NSViewController {
         webView.pageZoom = pageZooms[site.id.uuidString] ?? 1
         webView.autoresizingMask = [.width, .height]
         webCard.addSubview(webView)
-        // Restoring interactionState recreates navigation and scroll state; do not load a
-        // second request over it. Explicit URL navigation bypasses the saved state.
-        if url == nil, let state = interactionStates.removeValue(forKey: site.id) {
+        // Keep the recovery data until WebKit commits a restored navigation. A state
+        // that never starts navigation must not strand the page on an empty view.
+        if url == nil, let state = interactionStates[site.id] {
+            restoringIDs.insert(site.id)
             webView.interactionState = state
+            let id = site.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, weak webView] in
+                guard let self, let webView, self.webViews[id] === webView,
+                      self.restoringIDs.contains(id) else { return }
+                self.fallbackFromFailedRestore(id: id, webView: webView)
+            }
         } else {
             webView.load(URLRequest(url: url ?? resumeURL(for: site)))
         }
@@ -468,6 +487,34 @@ final class PanelViewController: NSViewController {
         loadedForceDark[id] = forceDark
         publishLiveIDs()
         return webView
+    }
+
+    /// Stored interaction data can contain form content. Keep only a small, bounded
+    /// in-memory cache and remove the oldest entries when it exceeds its budget.
+    private func discardInteractionState(for id: UUID) {
+        interactionStates[id] = nil
+        interactionStateOrder.removeAll { $0 == id }
+    }
+
+    private func saveInteractionState(_ state: Data, for id: UUID) {
+        discardInteractionState(for: id)
+        guard !state.isEmpty, state.count <= maxInteractionStateBytes else { return }
+        interactionStates[id] = state
+        interactionStateOrder.append(id)
+        var total = interactionStates.values.reduce(0) { $0 + $1.count }
+        while total > totalInteractionStateBudget, !interactionStateOrder.isEmpty {
+            let oldest = interactionStateOrder[0]
+            total -= interactionStates[oldest]?.count ?? 0
+            discardInteractionState(for: oldest)
+        }
+    }
+
+    private func fallbackFromFailedRestore(id: UUID, webView: WKWebView) {
+        guard restoringIDs.remove(id) != nil, webViews[id] === webView,
+              let site = site(for: id) else { return }
+        // Only one normal URL load. Do not retry a broken interaction state.
+        discardInteractionState(for: id)
+        webView.load(URLRequest(url: resumeURL(for: site)))
     }
 
     /// Start loading a hovered site after a short delay. At most one speculative page is kept.
@@ -776,13 +823,17 @@ final class PanelViewController: NSViewController {
 
     private func releaseWebView(id: UUID, preserveInteraction: Bool = false) {
         if preserveInteraction, let webView = webViews[id],
-           let state = webView.interactionState as? Data,
-           !state.isEmpty, state.count <= 2 * 1024 * 1024 {
-            interactionStates[id] = state
+           let state = webView.interactionState as? Data {
+            saveInteractionState(state, for: id)
         } else {
-            interactionStates[id] = nil
+            discardInteractionState(for: id)
         }
-        if preloadedID == id { preloadedID = nil }
+        restoringIDs.remove(id)
+        if preloadedID == id {
+            preloadedID = nil
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
+        }
         if id == homeID {  // home's search page is gone for good; a site reopens where it was
             pageOrder.removeAll { $0 == homeID }
             snapshots[homeID] = nil
@@ -818,6 +869,12 @@ final class PanelViewController: NSViewController {
         }
         webViewObservations[id] = nil
         webViews[id] = nil
+        restoringIDs.remove(id)
+        if preloadedID == id {
+            preloadedID = nil
+            preloadExpiryWork?.cancel()
+            preloadExpiryWork = nil
+        }
         snapshots[id] = nil
         model.badges[id] = nil
         loadedURLs[id] = nil
@@ -1264,7 +1321,7 @@ final class PanelViewController: NSViewController {
         let webView = webViews[id] ?? makeWebView(for: site)
         let wasMobile = loadedMobile[id] == true
         webView.removeFromSuperview()
-        interactionStates[id] = nil
+        discardInteractionState(for: id)
         forgetWebView(id: id)
         webView.isHidden = false
         // A phone layout looks lost in a big window.
