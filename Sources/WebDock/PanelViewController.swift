@@ -461,17 +461,6 @@ final class PanelViewController: NSViewController {
         webView.pageZoom = pageZooms[site.id.uuidString] ?? 1
         webView.autoresizingMask = [.width, .height]
         webCard.addSubview(webView)
-        let speculative = preloadedID == site.id
-        let hasSavedState = interactionStates[site.id] != nil
-        if SessionRestorationPolicy.shouldRestore(hasSavedState: hasSavedState,
-                                                   speculative: speculative, explicitURL: url != nil) {
-            beginRestoration(id: site.id, webView: webView)
-        } else if !SessionRestorationPolicy.shouldDeferLoad(hasSavedState: hasSavedState,
-                                                            speculative: speculative, explicitURL: url != nil) {
-            webView.load(URLRequest(url: url ?? resumeURL(for: site)))
-        }
-        // With a saved session, a hover only warms an empty WKWebView; nothing
-        // navigates until the user activates the site.
 
         let id = site.id
         webViewObservations[id] = [
@@ -491,6 +480,19 @@ final class PanelViewController: NSViewController {
         loadedMobile[id] = mobile
         loadedForceDark[id] = forceDark
         publishLiveIDs()
+        // Register the view and observers before starting navigation or restoration:
+        // synchronous WebKit callbacks must see the correct live instance.
+        let speculative = preloadedID == site.id
+        let hasSavedState = interactionStates[site.id] != nil
+        if SessionRestorationPolicy.shouldRestore(hasSavedState: hasSavedState,
+                                                   speculative: speculative, explicitURL: url != nil) {
+            beginRestoration(id: site.id, webView: webView)
+        } else if !SessionRestorationPolicy.shouldDeferLoad(hasSavedState: hasSavedState,
+                                                            speculative: speculative, explicitURL: url != nil) {
+            webView.load(URLRequest(url: url ?? resumeURL(for: site)))
+        }
+        // With a saved session, a hover only warms an empty WKWebView; nothing
+        // navigates until the user activates the site.
         return webView
     }
 
