@@ -1518,10 +1518,6 @@ extension PanelViewController {
 extension PanelViewController: WKNavigationDelegate {
     /// A new page loses the old one's fullscreen state.
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        if let id = webViews.first(where: { $0.value === webView })?.key,
-           restoringIDs.remove(id) != nil {
-            discardInteractionState(for: id)
-        }
         exitFullscreen(webView)
         // Some pages never finish loading (a request that hangs, such as an ad or a stream), and
         // their layout, dark mode and icons would never be looked at; after a while, look anyway.
@@ -1593,6 +1589,11 @@ extension PanelViewController: WKNavigationDelegate {
     /// Hands the icons the page declares, in its links and its web app manifest, to the favicon
     /// store, largest first.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // A committed navigation can still fail. Clear recovery data after a finish.
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restoringIDs.remove(id) != nil {
+            discardInteractionState(for: id)
+        }
         pageDidSettle(webView)
     }
 
