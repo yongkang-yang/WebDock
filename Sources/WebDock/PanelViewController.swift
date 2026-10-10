@@ -852,7 +852,7 @@ final class PanelViewController: NSViewController {
     }
 
     private func rememberURLs() {
-        for (id, webView) in webViews {
+        for (id, webView) in webViews where id != preloadedID {
             if let url = webView.url {
                 lastURLs[id.uuidString] = url.absoluteString
             }
@@ -861,13 +861,18 @@ final class PanelViewController: NSViewController {
     }
 
     private func releaseWebView(id: UUID, preserveInteraction: Bool = false) {
-        if preserveInteraction, let webView = webViews[id],
-           let state = webView.interactionState as? Data {
+        let speculative = preloadedID == id
+        // A hover-only view does not own the saved session. Expiry, replacement
+        // and panel hide must not overwrite or discard that session or URL.
+        if SessionRestorationPolicy.shouldKeepCachedStateWhenClosing(speculative: speculative) {
+            // No mutation: the snapshot survives until explicit user activation.
+        } else if preserveInteraction, let webView = webViews[id],
+                  let state = webView.interactionState as? Data {
             saveInteractionState(state, for: id)
         } else {
             discardInteractionState(for: id)
         }
-        restoringIDs.remove(id)
+        restorationPhases[id] = nil
         if preloadedID == id {
             preloadedID = nil
             preloadExpiryWork?.cancel()
@@ -882,7 +887,7 @@ final class PanelViewController: NSViewController {
             Self.closePage(of: webView)
             settledPages.remove(ObjectIdentifier(webView))
         }
-        forgetWebView(id: id)
+        forgetWebView(id: id, rememberLocation: !speculative)
     }
 
     /// AppKit's tooltip manager and Writing Tools' affordance hold on to the last web view that
@@ -898,8 +903,8 @@ final class PanelViewController: NSViewController {
     }
 
     /// Drops the panel's hold on a site's web view, remembering where it was.
-    private func forgetWebView(id: UUID) {
-        if let url = webViews[id]?.url {
+    private func forgetWebView(id: UUID, rememberLocation: Bool = true) {
+        if rememberLocation, let url = webViews[id]?.url {
             lastURLs[id.uuidString] = url.absoluteString
             UserDefaults.standard.set(lastURLs, forKey: lastURLsKey)
         }
@@ -908,7 +913,7 @@ final class PanelViewController: NSViewController {
         }
         webViewObservations[id] = nil
         webViews[id] = nil
-        restoringIDs.remove(id)
+        restorationPhases[id] = nil
         if preloadedID == id {
             preloadedID = nil
             preloadExpiryWork?.cancel()
@@ -1392,6 +1397,11 @@ final class PanelViewController: NSViewController {
     /// Moves the page, as it is, into a window of its own; the panel starts afresh for the site.
     private func openInWindow(id: UUID?) {
         guard let id = id ?? selectedID, let site = site(for: id) else { return }
+        // A speculative view holding a saved session has not navigated. Replace
+        // it with a deliberately opened view before detaching the window.
+        if preloadedID == id {
+            releaseWebView(id: id)
+        }
         let webView = webViews[id] ?? makeWebView(for: site)
         let wasMobile = loadedMobile[id] == true
         webView.removeFromSuperview()
@@ -1534,6 +1544,10 @@ extension PanelViewController {
 extension PanelViewController: WKNavigationDelegate {
     /// A new page loses the old one's fullscreen state.
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if let id = webViews.first(where: { $0.value === webView })?.key,
+           restorationPhases[id] == .awaitingCommit {
+            restorationPhases[id] = .committed
+        }
         exitFullscreen(webView)
         // Some pages never finish loading (a request that hangs, such as an ad or a stream), and
         // their layout, dark mode and icons would never be looked at; after a while, look anyway.
@@ -1549,7 +1563,7 @@ extension PanelViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
                  withError error: Error) {
         if let id = webViews.first(where: { $0.value === webView })?.key,
-           restoringIDs.contains(id) {
+           restorationPhases[id] != nil {
             fallbackFromFailedRestore(id: id, webView: webView)
         }
     }
@@ -1557,7 +1571,7 @@ extension PanelViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
                  withError error: Error) {
         if let id = webViews.first(where: { $0.value === webView })?.key,
-           restoringIDs.contains(id) {
+           restorationPhases[id] != nil {
             fallbackFromFailedRestore(id: id, webView: webView)
         }
     }
@@ -1607,7 +1621,7 @@ extension PanelViewController: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         // A committed navigation can still fail. Clear recovery data after a finish.
         if let id = webViews.first(where: { $0.value === webView })?.key,
-           restoringIDs.remove(id) != nil {
+           restorationPhases.removeValue(forKey: id) != nil {
             discardInteractionState(for: id)
         }
         pageDidSettle(webView)
