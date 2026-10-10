@@ -30,5 +30,8 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Test speculative preload safety
+        run: swift test
+
       - name: Build app bundle
         run: ./build.sh
