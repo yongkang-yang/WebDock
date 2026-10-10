@@ -4,7 +4,7 @@ A macOS menu bar app that keeps your favorite web apps — ChatGPT, Claude, Gemi
 
 ## Features
 
-- **Menu bar panel** — click the globe icon for a rounded Liquid Glass panel that drops down from the menu bar.
+- **Menu bar panel** — click the globe icon for a rounded Liquid Glass panel that drops down from the menu bar. A number next to the globe shows how many web pages are still running, including separate windows; the number disappears at zero. The start page and sign-in popups are not counted.
 - **Start page** — clock, greeting, a Google search box (or type a URL), your sites as tiles (drag to rearrange), and a "Jump back in" list of recent pages.
 - **Sidebar** — site icons beside the page; the button at the top left shows or hides it. `⌘1`–`⌘9` switch sites, `⇧⌘H` goes home, `⌘T` opens a fresh start page.
 - **All pages** — `⇧⌘\`, the button at the header's far right, or a trackpad pinch in shows the open pages as cards, like the iPhone's app switcher. Scroll or swipe through them, click one (or pinch out) to open it, drag one up to close its page; `Esc` goes back.
