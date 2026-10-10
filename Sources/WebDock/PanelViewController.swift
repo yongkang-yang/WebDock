@@ -870,7 +870,7 @@ final class PanelViewController: NSViewController {
         guard isPanelVisible, model.overview == nil else { return }
         // Only pages that are open; a released one has no page left to go back to.
         let processes = webViews.compactMapValues { WebProcessMemory.processID(for: $0) }
-        var processUse: [pid_t: Int] = [:]
+        var processUse: [Int32: Int] = [:]
         for pid in processes.values { processUse[pid, default: 0] += 1 }
         let pages = pageOrder.compactMap { id -> OverviewPage? in
             guard webViews[id] != nil, let site = site(for: id) else { return nil }
