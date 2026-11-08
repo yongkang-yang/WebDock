@@ -71,4 +71,4 @@ process, not the exclusive memory of one tab.
 
 ## License
 
-WebDock is licensed under the [GNU General Public License v3.0](LICENSE).
+WebDock is licensed under the [MIT License](LICENSE).
